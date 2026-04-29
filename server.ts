@@ -212,13 +212,38 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
 // ─── Notification emission ─────────────────────────────────────────────
 
 function extractText(act: ActivityEntry): string {
-  // request_body is the inbound A2A message. Shape: { parts: [{ type, text }, ...] }
-  // Fallback to summary if shape isn't recognised so the peer message at
-  // least surfaces SOMETHING in the session rather than getting silently dropped.
-  const body = act.request_body as { parts?: Array<{ type?: string; text?: string }> } | undefined
-  if (body?.parts && Array.isArray(body.parts)) {
-    const text = body.parts.filter(p => p.type === 'text').map(p => p.text ?? '').join('')
-    if (text) return text
+  // request_body is what the platform's a2a_proxy logs when forwarding A2A
+  // to this workspace. Empirically (verified against workspace-server's
+  // logA2ASuccess in a2a_proxy_helpers.go on 2026-04-29), the shape varies:
+  //
+  //   1. JSON-RPC envelope (most common — what real peers send):
+  //        { jsonrpc, id, method: "message/send", params: { message: { parts: [...] } } }
+  //   2. JSON-RPC with params.parts directly (some legacy callers):
+  //        { jsonrpc, id, method, params: { parts: [...] } }
+  //   3. Shorthand body (canvas-side direct sends):
+  //        { parts: [...] }
+  //
+  // Walk the envelope in priority order. Fall back to act.summary so the peer
+  // message at least surfaces SOMETHING — silent-drop is the failure mode this
+  // helper exists to prevent.
+  const body = act.request_body as {
+    parts?: Array<{ type?: string; text?: string }>
+    params?: {
+      message?: { parts?: Array<{ type?: string; text?: string }> }
+      parts?: Array<{ type?: string; text?: string }>
+    }
+  } | undefined
+
+  const candidates = [
+    body?.params?.message?.parts,  // shape 1 — JSON-RPC w/ message wrapper
+    body?.params?.parts,           // shape 2 — JSON-RPC params.parts
+    body?.parts,                   // shape 3 — shorthand
+  ]
+  for (const parts of candidates) {
+    if (Array.isArray(parts)) {
+      const text = parts.filter(p => p.type === 'text').map(p => p.text ?? '').join('')
+      if (text) return text
+    }
   }
   return act.summary ?? '(empty A2A message)'
 }
@@ -291,12 +316,26 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
       `Configured: ${WORKSPACE_IDS.join(', ')}`
     )
   }
-  // A2A request shape — matches workspace-server/internal/handlers/a2a_proxy.go's
-  // ProxyA2A handler expectations. The request_body becomes the peer's view of
-  // our message; we set source/target headers so the receiving workspace can
-  // attribute the message to us.
+  // A2A request shape — proper JSON-RPC 2.0 envelope as the platform's a2a_proxy
+  // expects. Empirically (verified 2026-04-29 against workspace-server's
+  // ProxyA2A handler), shorthand `{parts:[...]}` gets accepted but the platform
+  // strips params before forwarding to the peer's URL — the peer then sees an
+  // envelope with `params: null` and no message text. Wrapping in proper
+  // JSON-RPC preserves the message all the way through.
+  //
+  // `messageId` is generated client-side; the platform doesn't require it but
+  // peers may use it for idempotency / dedup. Random hex matches the a2a-sdk
+  // convention.
   const body = {
-    parts: [{ type: 'text', text: args.text }],
+    jsonrpc: '2.0',
+    id: crypto.randomUUID(),
+    method: 'message/send',
+    params: {
+      message: {
+        messageId: crypto.randomUUID(),
+        parts: [{ type: 'text', text: args.text }],
+      },
+    },
   }
   const resp = await fetch(`${PLATFORM_URL}/workspaces/${args.peer_id}/a2a`, {
     method: 'POST',
