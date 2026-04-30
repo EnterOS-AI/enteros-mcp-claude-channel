@@ -162,7 +162,17 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   let resp: Response
   try {
     resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        // Same-origin header — required by the tenant's edge WAF on hosted
+        // SaaS deployments. Without it the WAF rewrites the request and
+        // /workspaces/* returns an empty 404 (it's silently routed to the
+        // canvas Next.js, which has no /workspaces page). Node/Bun fetch
+        // doesn't auto-set Origin (that's a browser-only concern), so we
+        // set it explicitly to PLATFORM_URL — the only origin the bearer
+        // is valid against anyway, so no risk of leaking it elsewhere.
+        Origin: PLATFORM_URL,
+      },
       signal: AbortSignal.timeout(10_000),
     })
   } catch (err) {
@@ -343,6 +353,10 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       'X-Source-Workspace-Id': workspace_id,
+      // Same-origin header for SaaS edge WAF — see pollWorkspace fetch
+      // for the full explanation. /workspaces/* requires it on hosted
+      // tenants; localhost ignores it.
+      Origin: PLATFORM_URL,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
