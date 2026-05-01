@@ -691,12 +691,39 @@ const GetWorkspaceInfoArgsSchema = z.object({
   ).optional(),
 })
 
+// Pure formatter — kept exportable so server.test.ts can pin the
+// message shape without mocking fetch + resolveWatching just to read
+// one string. molecule-core#2429.
+export function formatRemovedWorkspaceError(
+  workspaceId: string,
+  body: { id?: string; removed_at?: string; hint?: string } | null | undefined,
+): string {
+  const safeBody = body ?? {}
+  const id = safeBody.id ?? workspaceId
+  const hint = safeBody.hint ?? 'Regenerate workspace + token from the canvas → Tokens tab.'
+  const removed = safeBody.removed_at ? ` at ${safeBody.removed_at}` : ''
+  return `Workspace ${id} was deleted on the platform${removed}. ${hint}`
+}
+
 async function getWorkspaceInfo(args: z.infer<typeof GetWorkspaceInfoArgsSchema>): Promise<unknown> {
   const { workspaceId, token } = resolveWatching(args._as_workspace)
   const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}`, {
     headers: platformHeaders(token),
     signal: AbortSignal.timeout(15_000),
   })
+  if (resp.status === 410) {
+    // molecule-core#2429: platform returns 410 Gone when status='removed'.
+    // Surface a clear "your workspace was deleted, re-onboard" error
+    // instead of a generic HTTP error — without this branch the operator
+    // sees `get_workspace_info failed: HTTP 410` and has to guess why.
+    let body: { id?: string; removed_at?: string; hint?: string } = {}
+    try {
+      body = await resp.json() as typeof body
+    } catch {
+      // best-effort body parse; the error message stands alone
+    }
+    throw new Error(formatRemovedWorkspaceError(workspaceId, body))
+  }
   if (!resp.ok) {
     const errText = await resp.text().catch(() => '')
     throw new Error(`get_workspace_info failed: HTTP ${resp.status} — ${errText.slice(0, 200)}`)
