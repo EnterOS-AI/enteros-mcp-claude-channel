@@ -16,9 +16,21 @@ No tunnel. No public endpoint. The plugin self-registers each watched workspace 
 
 ## Install
 
+This plugin distributes through the Claude Code marketplace flow. From any shell:
+
 ```bash
-claude --channels plugin:molecule@Molecule-AI/molecule-mcp-claude-channel
+# 1. Add the marketplace (one-time per machine)
+claude plugin marketplace add https://git.moleculesai.app/molecule-ai/molecule-mcp-claude-channel.git
+
+# 2. Install the plugin
+claude plugin install molecule@molecule-channel
 ```
+
+`molecule` is the plugin name (from `.claude-plugin/plugin.json`); `molecule-channel` is the marketplace name (from `.claude-plugin/marketplace.json`). Both live in the same repo — installing the marketplace makes the plugin available; installing the plugin enables it for your sessions.
+
+To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.1`. Without a ref, you track `main`.
+
+> **Note for users coming from the GitHub install path**: the GitHub `Molecule-AI` org was suspended on 2026-05-06 and is permanently gone. The earlier `claude --channels plugin:molecule@Molecule-AI/...` invocation no longer resolves. The new path (above) is the canonical replacement; behavior is unchanged.
 
 On first launch the plugin creates `~/.claude/channels/molecule/` and exits with a config-missing error pointing at `.env`. Fill it in:
 
@@ -43,8 +55,10 @@ The `.env` file is `chmod 600` after first read; tokens never appear in environm
 Re-launch Claude Code:
 
 ```bash
-claude --channels plugin:molecule@Molecule-AI/molecule-mcp-claude-channel
+claude
 ```
+
+(After the one-time `marketplace add` + `plugin install` above, the plugin loads automatically on every `claude` invocation; no per-launch flag needed.)
 
 You should see on stderr:
 
@@ -142,7 +156,7 @@ A2A messages can carry `Part` entries with `url` and `media_type`. The MVP deliv
 
 ## Contributing
 
-Single-file MCP server. The whole bridge lives in `server.ts`. Open issues at [Molecule-AI/molecule-mcp-claude-channel](https://github.com/Molecule-AI/molecule-mcp-claude-channel/issues).
+Single-file MCP server. The whole bridge lives in `server.ts`. Open issues at [molecule-ai/molecule-mcp-claude-channel](https://git.moleculesai.app/molecule-ai/molecule-mcp-claude-channel/issues).
 
 ## License
 
