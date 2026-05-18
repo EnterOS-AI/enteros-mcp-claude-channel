@@ -211,17 +211,32 @@ Claude can call `reply_to_workspace({peer_id, text})` to send the response back.
 ## Coexistence with the universal MCP wheel
 
 If you previously wired Molecule into Claude Code via the universal MCP wheel
-(`uv tool install molecule-ai-workspace-runtime` followed by
-`claude mcp add molecule`), **both** integrations register and you end up with
-two overlapping MCP tool namespaces in the same session — the wheel's
-`mcp__molecule__*` and this plugin's `mcp__plugin_molecule_molecule__*`. The
-duplicate tools are confusing and can cause replies to route through the wrong
-surface. Before installing this channel plugin, remove the wheel-based MCP
+(`uv tool install molecule-ai-workspace-runtime` followed by a
+`claude mcp add molecule-<workspace-slug>` line stamped by the Canvas
+modal — or, on pre-mc#1535 versions, a bare `claude mcp add molecule`),
+**both** integrations register and you end up with two overlapping MCP
+tool namespaces in the same session — the wheel's `mcp__molecule__*` and
+this plugin's `mcp__plugin_molecule_molecule__*`. The duplicate tools
+are confusing and can cause replies to route through the wrong surface.
+Before installing this channel plugin, remove the wheel-based MCP
 registration:
 
 ```bash
+# List the wheel-based entries (one per watched workspace):
+claude mcp list | grep '^molecule'
+
+# Remove each one — replace the slug with what `mcp list` printed:
+claude mcp remove molecule-<workspace-slug>
+
+# On pre-mc#1535 setups a single bare "molecule" entry exists instead:
 claude mcp remove molecule
 ```
+
+Note: the Canvas "Add to Claude Code" snippet (post-mc#1535) stamps a
+workspace-specific slug (e.g. `molecule-my-bot`) so multiple molecule
+workspaces don't collide in your `~/.claude.json`. If you have N
+workspaces wired via the wheel, you'll see N entries here — remove each
+one independently.
 
 ## Common errors
 
