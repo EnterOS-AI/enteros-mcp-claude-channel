@@ -538,6 +538,55 @@ export function buildChannelMeta(
   }
 }
 
+// formatChannelContent — assemble the user-visible content string for a
+// channel notification. The MCP host's TUI renders `params.content` as the
+// conversation turn body; the structured `params.meta` is only visible to
+// the model (Claude). Without a header in `content`, the human watching the
+// TUI sees only `molecule: <text>` and loses every meta field — sender
+// identity, platform of origin in multi-workspace setups, activity_id for
+// audit, attachments — even though all of it is right there in `meta`.
+//
+// This builds an email-style header (one field per line, blank line, body)
+// so the human reading the chat sees the full provenance, not a truncated
+// label. Field order matches `buildChannelMeta` so the header reads top-to-
+// bottom in roughly the same shape an operator would expect when correl-
+// ating to the activity feed.
+//
+// Fields are emitted only when meaningfully present (no empty-string lines,
+// no placeholder UUIDs). Full values — no truncation — because operators
+// debugging cross-workspace flows need the full identifiers to grep logs.
+export function formatChannelContent(
+  text: string,
+  meta: Record<string, unknown>,
+  attachments: ActivityAttachment[],
+): string {
+  const lines: string[] = []
+  lines.push(`From: ${meta.kind}`)
+  if (meta.peer_id) lines.push(`Peer ID: ${meta.peer_id}`)
+  if (meta.peer_name) lines.push(`Peer Name: ${meta.peer_name}`)
+  if (meta.peer_role) lines.push(`Peer Role: ${meta.peer_role}`)
+  if (meta.agent_card_url) lines.push(`Agent Card: ${meta.agent_card_url}`)
+  if (meta.user_name) lines.push(`User Name: ${meta.user_name}`)
+  if (meta.user_email) lines.push(`User Email: ${meta.user_email}`)
+  lines.push(`Workspace: ${meta.workspace_id}`)
+  if (meta.method) lines.push(`Method: ${meta.method}`)
+  lines.push(`Activity: ${meta.activity_id}`)
+  lines.push(`Time: ${meta.ts}`)
+  if (attachments.length > 0) {
+    lines.push('Attachments:')
+    for (const att of attachments) {
+      const parts: string[] = [att.kind]
+      if (att.name) parts.push(att.name)
+      if (att.uri) parts.push(att.uri)
+      if (att.mime_type) parts.push(`(${att.mime_type})`)
+      lines.push(`  - ${parts.join(' ')}`)
+    }
+  }
+  lines.push('') // blank separator between header and body
+  lines.push(text)
+  return lines.join('\n')
+}
+
 function emitNotification(mcp: Server, workspaceId: string, act: ActivityEntry): void {
   const text = extractText(act)
   // Prefer the platform's projected attachments[] (Layer 1 with
@@ -548,16 +597,20 @@ function emitNotification(mcp: Server, workspaceId: string, act: ActivityEntry):
       ? act.attachments
       : extractAttachments(act)
 
-  // Per the telegram channel reference: notifications/claude/channel is the
-  // host's hook. content becomes the conversation turn; meta is structured
-  // metadata Claude can reason about (workspace_id, peer_id, ts, peer
-  // identity, attachments, etc.). Build the meta via buildChannelMeta so
-  // tests can pin the shape without an MCP transport.
+  const meta = buildChannelMeta(workspaceId, act, attachments)
+
+  // notifications/claude/channel: content becomes the conversation turn
+  // body visible in the human's TUI; meta is structured metadata the model
+  // sees but the human does not. Without a header in content, the TUI shows
+  // just `molecule: <text>` and the human loses sender / workspace /
+  // activity-id provenance. formatChannelContent prepends an email-style
+  // header (one field per line, blank, body) so the human gets the full
+  // picture too, not a truncated label.
   mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: text,
-      meta: buildChannelMeta(workspaceId, act, attachments),
+      content: formatChannelContent(text, meta, attachments),
+      meta,
     },
   }).catch(err => {
     process.stderr.write(`molecule channel: failed to deliver notification for ${act.id}: ${err}\n`)
