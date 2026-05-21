@@ -12,7 +12,7 @@ Molecule peer ──A2A──> [your workspace] ──poll──> [this plugin] 
                                   └────────── POST /workspaces/:id/a2a ◄── reply_to_workspace tool ──┘
 ```
 
-No tunnel. No public endpoint. The plugin self-registers each watched workspace as `delivery_mode=poll` on startup and then long-polls `/workspaces/:id/activity?since_id=<cursor>` for new A2A traffic. Replies POST back to `/workspaces/:peer_id/a2a` via the same bearer token.
+No tunnel. No public endpoint. The plugin self-registers each watched workspace as `delivery_mode=poll` on startup and then long-polls `/workspaces/:id/activity?since_id=<cursor>` for new A2A traffic. Replies POST back to `/workspaces/:peer_id/a2a` via the same bearer token. A single plugin instance can watch workspaces on one or more Molecule tenant URLs.
 
 ## Install
 
@@ -28,7 +28,7 @@ claude plugin install molecule@molecule-channel
 
 `molecule` is the plugin name (from `.claude-plugin/plugin.json`); `molecule-channel` is the marketplace name (from `.claude-plugin/marketplace.json`). Both live in the same repo — installing the marketplace makes the plugin available; installing the plugin enables it for your sessions.
 
-To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.3`. Without a ref, you track `main`.
+To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.4`. Without a ref, you track `main`.
 
 Alternatively, to load the channel for a single session without a persistent
 marketplace install (useful for a quick try, or in CI), pass the channel spec
@@ -124,10 +124,19 @@ On first launch the plugin creates `~/.claude/channels/molecule/` and exits with
 ```
 # ~/.claude/channels/molecule/.env
 
-# Required
+# Required, canonical SSOT shape. This mirrors the platform's external
+# workspace registration fields and supports multiple tenant URLs.
+MOLECULE_WORKSPACES_JSON=[{"id":"ws-uuid-1","token":"tok-1","platform_url":"https://tenant-a.moleculesai.app"},{"id":"ws-uuid-2","token":"tok-2","platform_url":"https://tenant-b.moleculesai.app"}]
+
+# Legacy single-platform shape, still supported.
 MOLECULE_PLATFORM_URL=https://your-tenant.staging.moleculesai.app
 MOLECULE_WORKSPACE_IDS=ws-uuid-1,ws-uuid-2
 MOLECULE_WORKSPACE_TOKENS=tok-1,tok-2   # see "Getting workspace_id + token" below
+
+# Aligned multi-platform shape, also supported.
+MOLECULE_PLATFORM_URLS=https://tenant-a.moleculesai.app,https://tenant-b.moleculesai.app
+MOLECULE_WORKSPACE_IDS=ws-uuid-1,ws-uuid-2
+MOLECULE_WORKSPACE_TOKENS=tok-1,tok-2
 
 # Optional
 MOLECULE_POLL_INTERVAL_MS=5000     # default 5s
@@ -160,9 +169,18 @@ claude
 You should see on stderr:
 
 ```
-molecule channel: connected — watching 2 workspace(s) at https://your-tenant.staging.moleculesai.app
-  workspaces: ws-uuid-1, ws-uuid-2
-  poll: every 5000ms with 30s window
+molecule channel: connected — watching 2 workspace(s) across 1 platform(s)
+  targets: https://your-tenant.staging.moleculesai.app: ws-uuid-1, ws-uuid-2
+  delivery_mode=poll  cursor=...
+  poll: every 5000ms
+```
+
+For multi-platform config the startup line groups the watched workspaces by tenant URL:
+
+```
+molecule channel: connected — watching 2 workspace(s) across 2 platform(s)
+  targets: https://tenant-a.moleculesai.app: ws-uuid-1
+  https://tenant-b.moleculesai.app: ws-uuid-2
 ```
 
 ## Getting workspace_id + token
@@ -178,7 +196,7 @@ Every Molecule workspace has a workspace-scoped bearer that authenticates agains
 ### From the API
 
 ```bash
-curl -X POST "$MOLECULE_PLATFORM_URL/admin/workspaces/$WORKSPACE_ID/tokens" \
+curl -X POST "$PLATFORM_URL/admin/workspaces/$WORKSPACE_ID/tokens" \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"label": "claude-channel"}'
@@ -325,7 +343,7 @@ A2A messages can carry `Part` entries with `url` and `media_type`. The MVP deliv
 
 ## Contributing
 
-Single-file MCP server. The whole bridge lives in `server.ts`. Open issues at [molecule-ai/molecule-mcp-claude-channel](https://git.moleculesai.app/molecule-ai/molecule-mcp-claude-channel/issues).
+The MCP bridge lives in `server.ts`; shared config parsing lives in `targets.ts` so every adapter path uses the same workspace-target shape. Open issues at [molecule-ai/molecule-mcp-claude-channel](https://git.moleculesai.app/molecule-ai/molecule-mcp-claude-channel/issues).
 
 ## License
 
