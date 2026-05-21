@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { parseWorkspaceTargets } from './targets.ts'
+import { parseWorkspaceTargets } from '@molecule-ai/mcp-server/targets'
 
 describe('parseWorkspaceTargets', () => {
   it('keeps the legacy single-platform comma-separated env shape', () => {

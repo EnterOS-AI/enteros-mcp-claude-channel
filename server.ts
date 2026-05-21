@@ -48,7 +48,7 @@ import {
   type ActivityAttachment,
 } from './extract-text.ts'
 import { sendHeartbeat } from './heartbeat.ts'
-import { formatTargetSummary, parseWorkspaceTargets, type WorkspaceTarget } from './targets.ts'
+import { formatTargetSummary, parseWorkspaceTargets, type WorkspaceTarget } from '@molecule-ai/mcp-server/targets'
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
