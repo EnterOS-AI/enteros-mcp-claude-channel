@@ -40,7 +40,12 @@ import { z } from 'zod'
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { extractText, type ActivityEntry } from './extract-text.ts'
+import {
+  extractText,
+  extractAttachments,
+  type ActivityEntry,
+  type ActivityAttachment,
+} from './extract-text.ts'
 import { sendHeartbeat } from './heartbeat.ts'
 
 // ─── Config ─────────────────────────────────────────────────────────────
@@ -474,36 +479,66 @@ async function registerAsPoll(workspaceId: string): Promise<void> {
 
 // ─── Notification emission ─────────────────────────────────────────────
 
-function emitNotification(mcp: Server, workspaceId: string, act: ActivityEntry): void {
-  const text = extractText(act)
-  // Discriminate canvas-user messages (typed in the canvas chat panel) from
-  // peer-agent A2A traffic. The canvas wraps user chat as JSON-RPC
-  // message/send with source_id=null; real peers carry their workspace_id
-  // in source_id. The reply tool routes differently on this — canvas_user
-  // → /notify (lands in the user's chat), peer_agent → /a2a (proper JSON-RPC
-  // response to the calling peer).
+// buildChannelMeta — pure helper that assembles the `meta` payload for a
+// notifications/claude/channel emission from one ActivityEntry. Pulled out
+// of emitNotification so unit tests can pin the shape without spinning up
+// an MCP transport (mirrors the formatRemovedWorkspaceError pattern).
+//
+// Enriched fields (peer_name, peer_role, agent_card_url, attachments) are
+// spread defensively — emitted only when present on the activity row. This
+// keeps the meta payload coherent across three states:
+//
+//   1. Platform predates Layer 1 — act has no enriched fields, attachments
+//      parsed from request_body by extractAttachments at the adaptor.
+//   2. Platform supplies act.attachments inline (Layer 1 + `?include=peer_info`)
+//      — prefer the platform projection.
+//   3. canvas_user message (source_id=null) — peer_* legitimately absent,
+//      attachments may still be present if the user attached a file.
+export function buildChannelMeta(
+  workspaceId: string,
+  act: ActivityEntry,
+  attachments: ActivityAttachment[],
+): Record<string, unknown> {
   const peerId = act.source_id ?? ''
   const kind: 'canvas_user' | 'peer_agent' = peerId ? 'peer_agent' : 'canvas_user'
+  return {
+    source: 'molecule',
+    kind,
+    workspace_id: act.workspace_id,
+    watching_as: workspaceId,
+    peer_id: peerId,
+    method: act.method ?? '',
+    activity_id: act.id,
+    ts: act.created_at,
+    ...(act.peer_name ? { peer_name: act.peer_name } : {}),
+    ...(act.peer_role ? { peer_role: act.peer_role } : {}),
+    ...(act.agent_card_url ? { agent_card_url: act.agent_card_url } : {}),
+    ...(act.user_name ? { user_name: act.user_name } : {}),
+    ...(act.user_email ? { user_email: act.user_email } : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
+  }
+}
+
+function emitNotification(mcp: Server, workspaceId: string, act: ActivityEntry): void {
+  const text = extractText(act)
+  // Prefer the platform's projected attachments[] (Layer 1 with
+  // ?include=peer_info) when present; otherwise parse from request_body
+  // parts[] so attachments still surface on platforms predating Layer 1.
+  const attachments =
+    act.attachments && act.attachments.length > 0
+      ? act.attachments
+      : extractAttachments(act)
 
   // Per the telegram channel reference: notifications/claude/channel is the
   // host's hook. content becomes the conversation turn; meta is structured
-  // metadata Claude can reason about (workspace_id, peer_id, ts, etc.).
-  // image_path / attachment_* mirror telegram's shape so the host's
-  // attachment handling works without a custom path.
+  // metadata Claude can reason about (workspace_id, peer_id, ts, peer
+  // identity, attachments, etc.). Build the meta via buildChannelMeta so
+  // tests can pin the shape without an MCP transport.
   mcp.notification({
     method: 'notifications/claude/channel',
     params: {
       content: text,
-      meta: {
-        source: 'molecule',
-        kind,
-        workspace_id: act.workspace_id,
-        watching_as: workspaceId,
-        peer_id: peerId,
-        method: act.method ?? '',
-        activity_id: act.id,
-        ts: act.created_at,
-      },
+      meta: buildChannelMeta(workspaceId, act, attachments),
     },
   }).catch(err => {
     process.stderr.write(`molecule channel: failed to deliver notification for ${act.id}: ${err}\n`)
@@ -534,7 +569,7 @@ export const SERVER_CAPABILITIES = {
 } as const
 
 const mcp = new Server(
-  { name: 'molecule', version: '0.4.0-gitea.3' },
+  { name: 'molecule', version: '0.4.0-gitea.4' },
   { capabilities: SERVER_CAPABILITIES },
 )
 
