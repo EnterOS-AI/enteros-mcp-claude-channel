@@ -17,13 +17,14 @@
  *
  * State lives in ~/.claude/channels/molecule/:
  *   - access.json         workspace allowlist + per-workspace auth
- *   - .env                MOLECULE_PLATFORM_URL + tokens (chmod 600)
+ *   - .env                workspace targets + tokens (chmod 600)
  *   - bot.pid             singleton lock
  *   - inbox/              file attachments downloaded from peers
  *
- * Multi-workspace: declare MOLECULE_WORKSPACE_IDS as a comma-separated list;
- * each id polls independently. Auth is per-workspace via
- * MOLECULE_WORKSPACE_TOKENS (same order, comma-separated).
+ * Multi-workspace / multi-platform: prefer MOLECULE_WORKSPACES_JSON with
+ * [{id, token, platform_url}, ...]. Legacy MOLECULE_PLATFORM_URL +
+ * comma-separated MOLECULE_WORKSPACE_IDS/TOKENS still works for a single
+ * tenant URL; MOLECULE_PLATFORM_URLS supports one URL per workspace.
  *
  * Cancellation: SIGTERM/SIGINT cleanly drains in-flight pollers + posts a
  * single "channel disconnecting" line back to each watched workspace so
@@ -47,6 +48,7 @@ import {
   type ActivityAttachment,
 } from './extract-text.ts'
 import { sendHeartbeat } from './heartbeat.ts'
+import { formatTargetSummary, parseWorkspaceTargets, type WorkspaceTarget } from './targets.ts'
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
@@ -69,11 +71,14 @@ try {
   // Missing .env on first run is fine; we'll fail loudly below if required vars are absent.
 }
 
-const PLATFORM_URL = process.env.MOLECULE_PLATFORM_URL?.replace(/\/$/, '')
-const WORKSPACE_IDS = (process.env.MOLECULE_WORKSPACE_IDS ?? '')
-  .split(',').map(s => s.trim()).filter(Boolean)
-const WORKSPACE_TOKENS = (process.env.MOLECULE_WORKSPACE_TOKENS ?? '')
-  .split(',').map(s => s.trim()).filter(Boolean)
+let WORKSPACE_TARGETS: WorkspaceTarget[]
+try {
+  WORKSPACE_TARGETS = parseWorkspaceTargets(process.env)
+} catch (err) {
+  process.stderr.write(`molecule channel: invalid workspace target config: ${err}\n`)
+  process.exit(1)
+}
+const WORKSPACE_IDS = WORKSPACE_TARGETS.map(t => t.workspaceId)
 const POLL_INTERVAL_MS = parseInt(process.env.MOLECULE_POLL_INTERVAL_MS ?? '5000', 10)
 // POLL_WINDOW_SECS is only used for the initial "watch from now" cursor seed
 // — after that, the cursor (since_id) drives every subsequent poll. Older
@@ -112,12 +117,18 @@ const HEARTBEAT_INTERVAL_MS = Math.max(
   parseInt(process.env.MOLECULE_HEARTBEAT_INTERVAL_MS ?? '30000', 10) || 0,
 )
 
-if (!PLATFORM_URL || WORKSPACE_IDS.length === 0 || WORKSPACE_TOKENS.length === 0) {
+if (WORKSPACE_TARGETS.length === 0) {
   process.stderr.write(
     `molecule channel: required config missing\n` +
     `  set in ${ENV_FILE}\n` +
-    `  format:\n` +
+    `  canonical format:\n` +
+    `    MOLECULE_WORKSPACES_JSON=[{"id":"ws-uuid-1","token":"tok-1","platform_url":"https://tenant-a.moleculesai.app"},{"id":"ws-uuid-2","token":"tok-2","platform_url":"https://tenant-b.moleculesai.app"}]\n` +
+    `  legacy single-platform format:\n` +
     `    MOLECULE_PLATFORM_URL=https://your-tenant.staging.moleculesai.app\n` +
+    `    MOLECULE_WORKSPACE_IDS=ws-uuid-1,ws-uuid-2\n` +
+    `    MOLECULE_WORKSPACE_TOKENS=tok-1,tok-2\n` +
+    `  aligned multi-platform format:\n` +
+    `    MOLECULE_PLATFORM_URLS=https://tenant-a.moleculesai.app,https://tenant-b.moleculesai.app\n` +
     `    MOLECULE_WORKSPACE_IDS=ws-uuid-1,ws-uuid-2\n` +
     `    MOLECULE_WORKSPACE_TOKENS=tok-1,tok-2\n` +
     `  optional:\n` +
@@ -126,17 +137,21 @@ if (!PLATFORM_URL || WORKSPACE_IDS.length === 0 || WORKSPACE_TOKENS.length === 0
   )
   process.exit(1)
 }
-if (WORKSPACE_IDS.length !== WORKSPACE_TOKENS.length) {
-  process.stderr.write(
-    `molecule channel: MOLECULE_WORKSPACE_IDS and MOLECULE_WORKSPACE_TOKENS must have ` +
-    `the same number of entries (got ${WORKSPACE_IDS.length} ids vs ${WORKSPACE_TOKENS.length} tokens)\n`
-  )
-  process.exit(1)
-}
 
-const TOKEN_BY_WORKSPACE = new Map<string, string>(
-  WORKSPACE_IDS.map((id, i) => [id, WORKSPACE_TOKENS[i]])
+const TARGET_BY_WORKSPACE = new Map<string, WorkspaceTarget>(
+  WORKSPACE_TARGETS.map(t => [t.workspaceId, t])
 )
+
+function targetForWorkspace(workspaceId: string): WorkspaceTarget {
+  const target = TARGET_BY_WORKSPACE.get(workspaceId)
+  if (!target) {
+    throw new Error(
+      `workspace_id ${workspaceId} is not in MOLECULE_WORKSPACE_IDS. ` +
+      `Configured: ${WORKSPACE_IDS.join(', ')}`
+    )
+  }
+  return target
+}
 
 // ─── Singleton lock ─────────────────────────────────────────────────────
 //
@@ -273,8 +288,9 @@ export function shouldEmitActivity(act: Pick<ActivityEntry, 'method'>): boolean 
 }
 
 async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
-  const token = TOKEN_BY_WORKSPACE.get(workspaceId)!
-  const url = new URL(`${PLATFORM_URL}/workspaces/${workspaceId}/activity`)
+  const target = targetForWorkspace(workspaceId)
+  const { token, platformUrl } = target
+  const url = new URL(`${platformUrl}/workspaces/${workspaceId}/activity`)
   url.searchParams.set('type', 'a2a_receive')
   url.searchParams.set('limit', '100')
 
@@ -307,9 +323,9 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
         // /workspaces/* returns an empty 404 (it's silently routed to the
         // canvas Next.js, which has no /workspaces page). Node/Bun fetch
         // doesn't auto-set Origin (that's a browser-only concern), so we
-        // set it explicitly to PLATFORM_URL — the only origin the bearer
+        // set it explicitly to the target platform URL — the only origin the bearer
         // is valid against anyway, so no risk of leaking it elsewhere.
-        Origin: PLATFORM_URL,
+        Origin: platformUrl,
       },
       signal: AbortSignal.timeout(10_000),
     })
@@ -386,8 +402,9 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
 const PROBE_CURSOR = '00000000-0000-0000-0000-000000000000'
 
 async function probeCursorSupport(workspaceId: string): Promise<'ok' | 'too_old' | 'inconclusive'> {
-  const token = TOKEN_BY_WORKSPACE.get(workspaceId)!
-  const url = new URL(`${PLATFORM_URL}/workspaces/${workspaceId}/activity`)
+  const target = targetForWorkspace(workspaceId)
+  const { token, platformUrl } = target
+  const url = new URL(`${platformUrl}/workspaces/${workspaceId}/activity`)
   url.searchParams.set('type', 'a2a_receive')
   url.searchParams.set('since_id', PROBE_CURSOR)
   url.searchParams.set('limit', '1')
@@ -395,7 +412,7 @@ async function probeCursorSupport(workspaceId: string): Promise<'ok' | 'too_old'
   let resp: Response
   try {
     resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, Origin: PLATFORM_URL },
+      headers: { Authorization: `Bearer ${token}`, Origin: platformUrl },
       signal: AbortSignal.timeout(15_000),
     })
   } catch (err) {
@@ -428,7 +445,8 @@ async function probeCursorSupport(workspaceId: string): Promise<'ok' | 'too_old'
 // pre-poll-configured workspace, and a transient platform 5xx shouldn't
 // block channel startup. Log loudly so misconfiguration is visible.
 async function registerAsPoll(workspaceId: string): Promise<void> {
-  const token = TOKEN_BY_WORKSPACE.get(workspaceId)!
+  const target = targetForWorkspace(workspaceId)
+  const { token, platformUrl } = target
   const body = {
     id: workspaceId,
     delivery_mode: 'poll',
@@ -439,12 +457,12 @@ async function registerAsPoll(workspaceId: string): Promise<void> {
   }
   let resp: Response
   try {
-    resp = await fetch(`${PLATFORM_URL}/registry/register`, {
+    resp = await fetch(`${platformUrl}/registry/register`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        Origin: PLATFORM_URL,
+        Origin: platformUrl,
       },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
@@ -610,25 +628,19 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
       `Watching: ${WORKSPACE_IDS.join(', ')}`
     )
   }
-  const token = TOKEN_BY_WORKSPACE.get(workspace_id)
-  if (!token) {
-    throw new Error(
-      `workspace_id ${workspace_id} is not in MOLECULE_WORKSPACE_IDS. ` +
-      `Configured: ${WORKSPACE_IDS.join(', ')}`
-    )
-  }
+  const { token, platformUrl } = targetForWorkspace(workspace_id)
 
   const peerId = args.peer_id?.trim() ?? ''
   if (!peerId) {
     // Canvas-user reply — POST /workspaces/:our/notify with {message: text}.
     // The platform appends to the user-facing chat panel; no JSON-RPC envelope
     // because there's no peer URL on the other side, just the canvas UI.
-    const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspace_id}/notify`, {
+    const resp = await fetch(`${platformUrl}/workspaces/${workspace_id}/notify`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        Origin: PLATFORM_URL,
+        Origin: platformUrl,
       },
       body: JSON.stringify({ message: args.text }),
       signal: AbortSignal.timeout(30_000),
@@ -660,7 +672,7 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
       },
     },
   }
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${peerId}/a2a`, {
+  const resp = await fetch(`${platformUrl}/workspaces/${peerId}/a2a`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -669,7 +681,7 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
       // Same-origin header for SaaS edge WAF — see pollWorkspace fetch
       // for the full explanation. /workspaces/* requires it on hosted
       // tenants; localhost ignores it.
-      Origin: PLATFORM_URL,
+      Origin: platformUrl,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
@@ -688,7 +700,7 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
 // target. When watching exactly one workspace it's an obvious default;
 // for multi-watch, the caller must specify.
 
-function resolveWatching(asWorkspaceId?: string): { workspaceId: string; token: string } {
+function resolveWatching(asWorkspaceId?: string): { workspaceId: string; token: string; platformUrl: string } {
   let workspaceId = asWorkspaceId
   if (!workspaceId) {
     if (WORKSPACE_IDS.length === 1) workspaceId = WORKSPACE_IDS[0]
@@ -697,22 +709,16 @@ function resolveWatching(asWorkspaceId?: string): { workspaceId: string; token: 
       `Watching: ${WORKSPACE_IDS.join(', ')}`
     )
   }
-  const token = TOKEN_BY_WORKSPACE.get(workspaceId)
-  if (!token) {
-    throw new Error(
-      `${workspaceId} is not in MOLECULE_WORKSPACE_IDS. ` +
-      `Configured: ${WORKSPACE_IDS.join(', ')}`
-    )
-  }
-  return { workspaceId, token }
+  const target = targetForWorkspace(workspaceId)
+  return { workspaceId, token: target.token, platformUrl: target.platformUrl }
 }
 
 // Standard auth headers shared by every platform call. Origin is required
 // by the SaaS edge WAF — see pollWorkspace's fetch for the full story.
-function platformHeaders(token: string, extra: Record<string, string> = {}): Record<string, string> {
+function platformHeaders(platformUrl: string, token: string, extra: Record<string, string> = {}): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
-    Origin: PLATFORM_URL!,
+    Origin: platformUrl,
     ...extra,
   }
 }
@@ -754,19 +760,13 @@ async function listPeers(args: z.infer<typeof ListPeersArgsSchema>): Promise<Pee
       `Watching: ${WORKSPACE_IDS.join(', ')}`
     )
   }
-  const token = TOKEN_BY_WORKSPACE.get(workspace_id)
-  if (!token) {
-    throw new Error(
-      `workspace_id ${workspace_id} is not in MOLECULE_WORKSPACE_IDS. ` +
-      `Configured: ${WORKSPACE_IDS.join(', ')}`
-    )
-  }
-  const url = new URL(`${PLATFORM_URL}/registry/${workspace_id}/peers`)
+  const { token, platformUrl } = targetForWorkspace(workspace_id)
+  const url = new URL(`${platformUrl}/registry/${workspace_id}/peers`)
   if (args.q) url.searchParams.set('q', args.q)
   const resp = await fetch(url, {
     headers: {
       Authorization: `Bearer ${token}`,
-      Origin: PLATFORM_URL,
+      Origin: platformUrl,
     },
     signal: AbortSignal.timeout(15_000),
   })
@@ -804,9 +804,9 @@ export function formatRemovedWorkspaceError(
 }
 
 async function getWorkspaceInfo(args: z.infer<typeof GetWorkspaceInfoArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}`, {
-    headers: platformHeaders(token),
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
+  const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}`, {
+    headers: platformHeaders(platformUrl, token),
     signal: AbortSignal.timeout(15_000),
   })
   if (resp.status === 410) {
@@ -856,7 +856,7 @@ const SendMessageToUserArgsSchema = z.object({
 })
 
 async function sendMessageToUser(args: z.infer<typeof SendMessageToUserArgsSchema>): Promise<string> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   let attachmentRefs: unknown[] = []
   if (args.attachments && args.attachments.length > 0) {
     // Multipart upload — same shape as workspace/a2a_tools.py:_upload_chat_files.
@@ -871,9 +871,9 @@ async function sendMessageToUser(args: z.infer<typeof SendMessageToUserArgsSchem
       // Bun.file is a Blob; FormData accepts Blob with filename.
       form.append('files', file, path.split('/').pop() ?? 'attachment')
     }
-    const upResp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}/chat/uploads`, {
+    const upResp = await fetch(`${platformUrl}/workspaces/${workspaceId}/chat/uploads`, {
       method: 'POST',
-      headers: platformHeaders(token),
+      headers: platformHeaders(platformUrl, token),
       body: form,
       signal: AbortSignal.timeout(60_000),
     })
@@ -886,9 +886,9 @@ async function sendMessageToUser(args: z.infer<typeof SendMessageToUserArgsSchem
   }
   const body: Record<string, unknown> = { message: args.message }
   if (attachmentRefs.length > 0) body.attachments = attachmentRefs
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}/notify`, {
+  const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}/notify`, {
     method: 'POST',
-    headers: platformHeaders(token, { 'Content-Type': 'application/json' }),
+    headers: platformHeaders(platformUrl, token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(30_000),
   })
@@ -916,7 +916,7 @@ const DelegateTaskArgsSchema = z.object({
 })
 
 async function delegateTask(args: z.infer<typeof DelegateTaskArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   if (!args.workspace_id) throw new Error('workspace_id (target peer) is required')
   if (!args.task) throw new Error('task is required')
   const body = {
@@ -932,9 +932,9 @@ async function delegateTask(args: z.infer<typeof DelegateTaskArgsSchema>): Promi
   }
   // 60s timeout because sync delegation waits for the peer to actually
   // produce a response. Long-running peer work should use the async path.
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${args.workspace_id}/a2a`, {
+  const resp = await fetch(`${platformUrl}/workspaces/${args.workspace_id}/a2a`, {
     method: 'POST',
-    headers: platformHeaders(token, {
+    headers: platformHeaders(platformUrl, token, {
       'Content-Type': 'application/json',
       'X-Source-Workspace-Id': workspaceId,
     }),
@@ -963,16 +963,16 @@ async function sha256Hex(s: string): Promise<string> {
 const DelegateTaskAsyncArgsSchema = DelegateTaskArgsSchema
 
 async function delegateTaskAsync(args: z.infer<typeof DelegateTaskAsyncArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   if (!args.workspace_id) throw new Error('workspace_id (target peer) is required')
   if (!args.task) throw new Error('task is required')
   // Idempotency key: SHA-256 of (target, task) so a restart firing the same
   // delegation gets the existing delegation_id back instead of creating a
   // duplicate (mirrors workspace/a2a_tools.py — fixes #1456 there).
   const idem = (await sha256Hex(`${args.workspace_id}:${args.task}`)).slice(0, 32)
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}/delegate`, {
+  const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}/delegate`, {
     method: 'POST',
-    headers: platformHeaders(token, { 'Content-Type': 'application/json' }),
+    headers: platformHeaders(platformUrl, token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       target_id: args.workspace_id,
       task: args.task,
@@ -1003,9 +1003,9 @@ const CheckTaskStatusArgsSchema = z.object({
 })
 
 async function checkTaskStatus(args: z.infer<typeof CheckTaskStatusArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}/delegations`, {
-    headers: platformHeaders(token),
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
+  const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}/delegations`, {
+    headers: platformHeaders(platformUrl, token),
     signal: AbortSignal.timeout(15_000),
   })
   if (!resp.ok) {
@@ -1037,11 +1037,11 @@ const CommitMemoryArgsSchema = z.object({
 })
 
 async function commitMemory(args: z.infer<typeof CommitMemoryArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   if (!args.content) throw new Error('content is required')
-  const resp = await fetch(`${PLATFORM_URL}/workspaces/${workspaceId}/memories`, {
+  const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}/memories`, {
     method: 'POST',
-    headers: platformHeaders(token, { 'Content-Type': 'application/json' }),
+    headers: platformHeaders(platformUrl, token, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({
       content: args.content,
       scope: (args.scope ?? 'LOCAL').toUpperCase(),
@@ -1074,13 +1074,13 @@ const RecallMemoryArgsSchema = z.object({
 })
 
 async function recallMemory(args: z.infer<typeof RecallMemoryArgsSchema>): Promise<unknown> {
-  const { workspaceId, token } = resolveWatching(args._as_workspace)
-  const url = new URL(`${PLATFORM_URL}/workspaces/${workspaceId}/memories`)
+  const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
+  const url = new URL(`${platformUrl}/workspaces/${workspaceId}/memories`)
   url.searchParams.set('workspace_id', workspaceId)
   if (args.query) url.searchParams.set('q', args.query)
   if (args.scope) url.searchParams.set('scope', args.scope.toUpperCase())
   const resp = await fetch(url, {
-    headers: platformHeaders(token),
+    headers: platformHeaders(platformUrl, token),
     signal: AbortSignal.timeout(15_000),
   })
   if (!resp.ok) {
@@ -1336,7 +1336,7 @@ loadCursors()
   if (anyTooOld) {
     process.stderr.write(
       `molecule channel: refusing to start in poll mode against an older platform. ` +
-      `Pin MOLECULE_PLATFORM_URL to an upgraded tenant or downgrade to plugin v0.1.\n`
+      `Pin this workspace's platform URL to an upgraded tenant or downgrade to plugin v0.1.\n`
     )
     // exit triggers the 'exit' listener, which unlinks the PID file.
     process.exit(2)
@@ -1356,8 +1356,8 @@ if (AUTO_REGISTER_POLL) {
 }
 
 process.stderr.write(
-  `molecule channel: connected — watching ${WORKSPACE_IDS.length} workspace(s) at ${PLATFORM_URL}\n` +
-  `  workspaces: ${WORKSPACE_IDS.join(', ')}\n` +
+  `molecule channel: connected — watching ${WORKSPACE_IDS.length} workspace(s) across ${new Set(WORKSPACE_TARGETS.map(t => t.platformUrl)).size} platform(s)\n` +
+  `  targets: ${formatTargetSummary(WORKSPACE_TARGETS)}\n` +
   `  delivery_mode=poll  cursor=${CURSOR_FILE}  auto_register=${AUTO_REGISTER_POLL}\n` +
   `  poll: every ${POLL_INTERVAL_MS}ms (cursor-based; ${POLL_WINDOW_SECS}s window only used for first-run seed)\n` +
   `  heartbeat: ` +
@@ -1394,12 +1394,13 @@ WORKSPACE_IDS.forEach((id, i) => {
 // the full presence-bug rationale + wire-shape contract.
 if (HEARTBEAT_INTERVAL_MS > 0) {
   WORKSPACE_IDS.forEach((id, i) => {
+    const target = targetForWorkspace(id)
     setTimeout(() => {
       setInterval(
         () => void sendHeartbeat({
-          platformUrl: PLATFORM_URL,
+          platformUrl: target.platformUrl,
           workspaceId: id,
-          token: TOKEN_BY_WORKSPACE.get(id)!,
+          token: target.token,
         }),
         HEARTBEAT_INTERVAL_MS,
       ).unref()
