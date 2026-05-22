@@ -47,6 +47,19 @@ import {
   type ActivityEntry,
   type ActivityAttachment,
 } from './extract-text.ts'
+// Layer C of RFC#640's 4-layer upload-resolution cascade — consume the
+// base MCP's resolvePendingUpload / URICache / rewritePendingURIs helpers
+// instead of re-implementing inbox_uploads.py semantics in TS. The base
+// MCP's inbox-uploads module is the SSOT-aligned shared implementation
+// across all TS adapters (channel + future hermes-ts / codex-ts etc.).
+// See feedback_three_layer_data_responsibility_platform_base_adaptor +
+// internal#640 spec MANDATORY contract section.
+import {
+  resolvePendingUpload,
+  URICache,
+  rewritePendingURIs,
+  isChatUploadReceiveRow,
+} from '@molecule-ai/mcp-server/inbox-uploads'
 import { sendHeartbeat } from './heartbeat.ts'
 import { formatTargetSummary, parseWorkspaceTargets, type WorkspaceTarget } from '@molecule-ai/mcp-server/targets'
 import { EXTERNAL_WORKSPACE_MCP_TOOLS } from '@molecule-ai/mcp-server/external-workspace-tools'
@@ -56,6 +69,11 @@ import { EXTERNAL_WORKSPACE_MCP_TOOLS } from '@molecule-ai/mcp-server/external-w
 const STATE_DIR = process.env.MOLECULE_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'molecule')
 const ENV_FILE = join(STATE_DIR, '.env')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
+// Where chat-upload bytes get cached after resolvePendingUpload — per
+// RFC#640's spec the adapter picks an adapter-specific path; this is
+// the Claude Code channel's choice (matches the path documented in the
+// Layer A spec section for this adapter).
+const INBOX_DIR = join(STATE_DIR, 'inbox')
 const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
 
 // Load ~/.claude/channels/molecule/.env into process.env. Real env wins.
@@ -233,6 +251,15 @@ process.on('uncaughtException', err => {
 
 const cursors = new Map<string, string>()
 
+// Shared URI cache for chat-upload resolution. Keys are
+// `platform-pending:<ws>/<file_id>` strings — the workspace_id is part
+// of the key so a single module-level cache is safe across multiple
+// watched workspaces (no per-workspace cache needed). Bounded LRU
+// default 32 entries per the URI_CACHE_MAX_ENTRIES TS default (Python
+// reference uses 1024 because in-container runtime has more memory
+// headroom; channel plugin runs in a host shell with less).
+const uriCache = new URICache()
+
 function loadCursors(): void {
   if (!existsSync(CURSOR_FILE)) return
   try {
@@ -374,6 +401,36 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   if (activities.length === 0) return
   for (const act of activities) {
     if (!shouldEmitActivity(act)) continue
+    // Upload resolution (RFC#640 5-step MANDATORY contract step 1-4):
+    // chat_upload_receive rows have lower activity_logs.id than the
+    // message that references their `platform-pending:` URI (per the
+    // Python reference comment in inbox_uploads.py:23-32), so by the
+    // time the message row arrives in this same poll batch (or a later
+    // one) the cache is already populated. Sequential await is OK —
+    // single-threaded JS event loop, 32-entry cache, 25 MB cap.
+    if (isChatUploadReceiveRow(act)) {
+      try {
+        await resolvePendingUpload({
+          workspaceId,
+          fileId: (act.request_body as { file_id?: string } | undefined)?.file_id ?? '',
+          authHeaders: { Authorization: `Bearer ${token}`, Origin: platformUrl },
+          cacheDir: INBOX_DIR,
+          filename: (act.request_body as { name?: string } | undefined)?.name,
+          cache: uriCache,
+          platformUrl,
+        })
+      } catch (err) {
+        // Resolution failure ≠ block delivery. The agent will see the
+        // unresolved `platform-pending:` URI it can't open, which is
+        // preferable to silently dropping the entire message. Log to
+        // stderr so the failure is visible in the channel's debug
+        // surface. Re-attempt on the next tick if the activity row is
+        // re-delivered (cursor advances regardless — best-effort).
+        process.stderr.write(
+          `molecule channel: upload resolution failed for ${act.id} in ${workspaceId}: ${err}\n`,
+        )
+      }
+    }
     emitNotification(mcp, workspaceId, act)
   }
   const newest = activities[activities.length - 1].id
@@ -588,16 +645,23 @@ export function formatChannelContent(
 }
 
 function emitNotification(mcp: Server, workspaceId: string, act: ActivityEntry): void {
-  const text = extractText(act)
+  // Upload resolution step 5 (URI rewrite): walk the activity row and
+  // substitute any platform-pending:<ws>/<file_id> URIs with the cached
+  // local file:// URIs from prior resolvePendingUpload calls. The
+  // rewrite is non-destructive — extractText / extractAttachments see
+  // the rewritten shape; act.request_body itself is unmodified for any
+  // downstream consumer.
+  const rewrittenAct = rewritePendingURIs(act, uriCache) as ActivityEntry
+  const text = extractText(rewrittenAct)
   // Prefer the platform's projected attachments[] (Layer 1 with
   // ?include=peer_info) when present; otherwise parse from request_body
   // parts[] so attachments still surface on platforms predating Layer 1.
   const attachments =
-    act.attachments && act.attachments.length > 0
-      ? act.attachments
-      : extractAttachments(act)
+    rewrittenAct.attachments && rewrittenAct.attachments.length > 0
+      ? rewrittenAct.attachments
+      : extractAttachments(rewrittenAct)
 
-  const meta = buildChannelMeta(workspaceId, act, attachments)
+  const meta = buildChannelMeta(workspaceId, rewrittenAct, attachments)
 
   // notifications/claude/channel: content becomes the conversation turn
   // body visible in the human's TUI; meta is structured metadata the model
