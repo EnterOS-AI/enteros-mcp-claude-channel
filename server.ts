@@ -321,6 +321,16 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   const url = new URL(`${platformUrl}/workspaces/${workspaceId}/activity`)
   url.searchParams.set('type', 'a2a_receive')
   url.searchParams.set('limit', '100')
+  // include=peer_info opts into Layer 1's row-level projection:
+  //   peer_name / peer_role / agent_card_url (when source_id resolves to a workspace)
+  //   user_name / user_email (canvas-auth — once RFC#637 / CP IAM ships)
+  //   attachments[] (uniform across message/send AND chat_upload_receive flat-uploads
+  //     once mc#1657 lands platform-side; this client just forwards what the server
+  //     provides)
+  // Pre-Layer-1 platforms ignore the unknown query param and return the bare row
+  // shape — the adaptor degrades gracefully because every consumer reads enriched
+  // fields defensively (omit-when-absent via buildChannelMeta).
+  url.searchParams.set('include', 'peer_info')
 
   const cursor = cursors.get(workspaceId)
   if (cursor) {
