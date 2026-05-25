@@ -140,23 +140,44 @@ describe('buildChannelMeta — attachments', () => {
   test('omits attachments key entirely when none', () => {
     const meta = buildChannelMeta('w', act(), [])
     expect(meta).not.toHaveProperty('attachments')
+    expect(meta).not.toHaveProperty('attachment_count')
   })
 
-  test('includes attachments when at least one is present', () => {
+  test('flattens attachment metadata to scalar channel meta fields', () => {
     const att: ActivityAttachment[] = [
-      { kind: 'file', uri: 'workspace:doc.pdf', mime_type: 'application/pdf' },
+      { kind: 'file', uri: 'file:///tmp/doc.pdf', mime_type: 'application/pdf', name: 'doc.pdf' },
     ]
     const meta = buildChannelMeta('w', act(), att)
-    expect(meta.attachments).toEqual(att)
+    expect(meta).not.toHaveProperty('attachments')
+    expect(meta.attachment_count).toBe('1')
+    expect(meta.attachment_kind).toBe('file')
+    expect(meta.attachment_path).toBe('/tmp/doc.pdf')
+    expect(meta.attachment_name).toBe('doc.pdf')
+    expect(meta.attachment_mime).toBe('application/pdf')
   })
 
-  test('canvas_user row can still surface attachments (no peer_id required)', () => {
+  test('canvas_user row can still surface scalar attachment fields', () => {
     const att: ActivityAttachment[] = [
       { kind: 'image', uri: 'workspace:screenshot.png' },
     ]
     const meta = buildChannelMeta('w', act({ source_id: null }), att)
     expect(meta.kind).toBe('canvas_user')
     expect(meta.peer_id).toBe('')
-    expect(meta.attachments).toEqual(att)
+    expect(meta.attachment_count).toBe('1')
+    expect(meta.attachment_kind).toBe('image')
+    expect(meta.attachment_path).toBe('workspace:screenshot.png')
+    expect(meta).not.toHaveProperty('image_path')
+  })
+
+  test('multiple attachments get numbered scalar fields', () => {
+    const meta = buildChannelMeta('w', act(), [
+      { kind: 'image', uri: 'file:///tmp/a.png', name: 'a.png' },
+      { kind: 'file', uri: 'file:///tmp/b.pdf', name: 'b.pdf' },
+    ])
+    expect(meta.attachment_count).toBe('2')
+    expect(meta.attachment_path).toBe('/tmp/a.png')
+    expect(meta.image_path).toBe('/tmp/a.png')
+    expect(meta.attachment_2_path).toBe('/tmp/b.pdf')
+    expect(meta.attachment_2_name).toBe('b.pdf')
   })
 })

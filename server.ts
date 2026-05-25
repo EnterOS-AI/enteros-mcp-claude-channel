@@ -440,6 +440,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
           `molecule channel: upload resolution failed for ${act.id} in ${workspaceId}: ${err}\n`,
         )
       }
+      continue
     }
     emitNotification(mcp, workspaceId, act)
   }
@@ -601,8 +602,33 @@ export function buildChannelMeta(
     ...(act.agent_card_url ? { agent_card_url: act.agent_card_url } : {}),
     ...(act.user_name ? { user_name: act.user_name } : {}),
     ...(act.user_email ? { user_email: act.user_email } : {}),
-    ...(attachments.length > 0 ? { attachments } : {}),
+    ...flattenAttachmentMeta(attachments),
   }
+}
+
+function attachmentPathOrUri(att: ActivityAttachment): string | undefined {
+  if (!att.uri) return undefined
+  return att.uri.startsWith('file://') ? att.uri.slice('file://'.length) : att.uri
+}
+
+function flattenAttachmentMeta(attachments: ActivityAttachment[]): Record<string, string> {
+  if (attachments.length === 0) return {}
+
+  const meta: Record<string, string> = {
+    attachment_count: String(attachments.length),
+  }
+  attachments.forEach((att, idx) => {
+    const prefix = idx === 0 ? 'attachment' : `attachment_${idx + 1}`
+    meta[`${prefix}_kind`] = att.kind
+    const pathOrUri = attachmentPathOrUri(att)
+    if (pathOrUri) meta[`${prefix}_path`] = pathOrUri
+    if (att.name) meta[`${prefix}_name`] = att.name
+    if (att.mime_type) meta[`${prefix}_mime`] = att.mime_type
+    if (idx === 0 && att.kind === 'image' && pathOrUri?.startsWith('/')) {
+      meta.image_path = pathOrUri
+    }
+  })
+  return meta
 }
 
 // formatChannelContent — assemble the user-visible content string for a
@@ -644,7 +670,8 @@ export function formatChannelContent(
     for (const att of attachments) {
       const parts: string[] = [att.kind]
       if (att.name) parts.push(att.name)
-      if (att.uri) parts.push(att.uri)
+      const pathOrUri = attachmentPathOrUri(att)
+      if (pathOrUri) parts.push(pathOrUri)
       if (att.mime_type) parts.push(`(${att.mime_type})`)
       lines.push(`  - ${parts.join(' ')}`)
     }
@@ -715,8 +742,14 @@ export const SERVER_CAPABILITIES = {
 } as const
 
 const mcp = new Server(
-  { name: 'molecule', version: '0.4.0-gitea.4' },
-  { capabilities: SERVER_CAPABILITIES },
+  { name: 'molecule', version: '0.4.0-gitea.6' },
+  {
+    capabilities: SERVER_CAPABILITIES,
+    instructions: [
+      'Messages from Molecule arrive as channel messages with source="molecule". If the meta has image_path or attachment_path, Read that local path before responding when the file matters.',
+      'Reply to the sender with reply_to_workspace. The workspace_id or peer_id in the channel metadata identifies the route.',
+    ].join('\n'),
+  },
 )
 
 // Tool: reply_to_workspace ----------------------------------------------
