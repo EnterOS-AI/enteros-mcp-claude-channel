@@ -145,11 +145,11 @@ describe('formatChannelContent — attachments', () => {
 
   test('renders file attachment with name + uri + mime_type', () => {
     const att: ActivityAttachment[] = [
-      { kind: 'file', name: 'report.pdf', uri: 'workspace:uploads/report.pdf', mime_type: 'application/pdf' },
+      { kind: 'file', name: 'report.pdf', uri: 'file:///tmp/report.pdf', mime_type: 'application/pdf' },
     ]
     const out = formatChannelContent('see attached', baseMeta(), att)
     expect(out).toContain('Attachments:')
-    expect(out).toContain('  - file report.pdf workspace:uploads/report.pdf (application/pdf)')
+    expect(out).toContain('  - file report.pdf /tmp/report.pdf (application/pdf)')
   })
 
   test('renders multiple attachments in input order', () => {
