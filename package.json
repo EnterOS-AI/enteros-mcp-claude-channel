@@ -10,7 +10,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@molecule-ai/mcp-server": "1.3.1",
+    "@molecule-ai/mcp-server": "1.4.0",
     "@modelcontextprotocol/sdk": "^1.0.0"
   }
 }

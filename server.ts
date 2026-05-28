@@ -38,7 +38,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, renameSync, unlinkSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import {
@@ -63,6 +63,11 @@ import {
 import { sendHeartbeat } from './heartbeat.ts'
 import { formatTargetSummary, parseWorkspaceTargets, type WorkspaceTarget } from '@molecule-ai/mcp-server/targets'
 import { EXTERNAL_WORKSPACE_MCP_TOOLS } from '@molecule-ai/mcp-server/external-workspace-tools'
+// Session-namespaced cursor store + orphan pruning, shared with future TS
+// adapters (hermes-ts / codex-ts) via the base MCP — SSOT for the polling
+// cursor contract. See internal#726 + the primary-election logic below.
+import { CursorStore, cursorFileName, pruneOrphanCursors } from '@molecule-ai/mcp-server/session-cursor'
+import { electSession, pidIsAlive } from './session-lock.ts'
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
@@ -74,7 +79,6 @@ const PID_FILE = join(STATE_DIR, 'bot.pid')
 // the Claude Code channel's choice (matches the path documented in the
 // Layer A spec section for this adapter).
 const INBOX_DIR = join(STATE_DIR, 'inbox')
-const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
 
 // Load ~/.claude/channels/molecule/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where tokens live.
@@ -172,37 +176,66 @@ function targetForWorkspace(workspaceId: string): WorkspaceTarget {
   return target
 }
 
-// ─── Singleton lock ─────────────────────────────────────────────────────
+// ─── Primary election + session-namespaced cursor ───────────────────────
 //
-// One channel server per host — multiple Claude sessions polling the same
-// workspaces would race the dedup state and double-deliver. If a previous
-// session crashed (SIGKILL, terminal closed) its server can survive as an
-// orphan; kill it before we start.
+// We no longer enforce "one poller per host by SIGTERM" (issue #26
+// secondary / internal#726). The platform supports concurrent sessions on
+// one workspace — register/heartbeat are workspace-keyed last-writer-wins
+// and /activity is read-only with a client-driven since_id — so a second
+// `claude` session that loads this plugin must NOT evict the first.
+//
+// Instead we elect a role from the pid lock:
+//   - primary   → claims `bot.pid` + uses the shared `cursor.json`, so the
+//                 common single-session restart resumes where it left off.
+//   - secondary → a concurrent session: its own `cursor.<pid>.json`, never
+//                 touches the pid lock, never evicts the primary.
+// Nobody is SIGTERM'd, which also removes the old pid-reuse cross-process-
+// kill hazard. electSession() is a pure helper (see session-lock.ts).
 
-try {
-  const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
-  if (stale > 1 && stale !== process.pid) {
-    process.kill(stale, 0)  // throws if dead
-    process.stderr.write(`molecule channel: replacing stale poller pid=${stale}\n`)
-    process.kill(stale, 'SIGTERM')
-  }
-} catch {}
-writeFileSync(PID_FILE, String(process.pid))
+const election = electSession(
+  existsSync(PID_FILE) ? readFileSync(PID_FILE, 'utf8') : null,
+  pidIsAlive,
+  process.pid,
+)
+if (election.role === 'primary') {
+  writeFileSync(PID_FILE, String(process.pid))
+} else {
+  process.stderr.write(
+    `molecule channel: primary poller pid=${election.incumbentPid} already running — ` +
+    `starting as secondary (own cursor ${cursorFileName(election.sessionKey)}, no eviction)\n`,
+  )
+}
 
-// Unlink the PID file on every exit path — including process.exit(N)
-// from the cursor-support probe (v0.2.1) which doesn't go through the
-// SIGINT/SIGTERM handlers. Without this, a non-clean exit leaves a
-// stale pid in PID_FILE pointing at a dead pid; the next launch's
-// `process.kill(stale, 'SIGTERM')` (above) would deliver the signal to
-// whatever unrelated process now owns that PID — exactly the cross-
-// process-kill hazard the singleton lock exists to prevent. exit
-// listeners only run synchronous code; unlinkSync is the right tool.
+// Sweep cursor files left by dead secondary sessions (crash/SIGKILL). Live
+// concurrent sessions and the shared primary file are preserved.
+for (const orphan of pruneOrphanCursors(STATE_DIR, key => pidIsAlive(parseInt(key, 10)))) {
+  process.stderr.write(`molecule channel: pruned orphan cursor ${orphan}\n`)
+}
+
+// The session-keyed cursor store (shared cursor.json for the primary;
+// cursor.<pid>.json for a secondary). Replaces the old module-level Map +
+// hand-rolled load/save — same atomic temp+rename semantics, now in the
+// base MCP so every TS adapter shares one implementation.
+const cursorStore = new CursorStore({
+  stateDir: STATE_DIR,
+  sessionKey: election.sessionKey,
+  onLoadError: err =>
+    process.stderr.write(`molecule channel: cursor file unreadable (${err}); starting fresh\n`),
+}).load()
+
+// On exit: the primary unlinks the pid lock it owns; a secondary unlinks its
+// own per-session cursor file. The shared cursor.json is NEVER unlinked (it
+// must survive a primary restart for resume). exit listeners run sync only.
 process.on('exit', () => {
-  try {
-    const owned = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
-    if (owned === process.pid) unlinkSync(PID_FILE)
-  } catch {
-    // Already gone, or another process took ownership — leave it alone.
+  if (election.role === 'primary') {
+    try {
+      const owned = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
+      if (owned === process.pid) unlinkSync(PID_FILE)
+    } catch {
+      // Already gone, or another process took ownership — leave it alone.
+    }
+  } else {
+    cursorStore.unlink()
   }
 })
 
@@ -240,16 +273,16 @@ process.on('uncaughtException', err => {
 // this plugin successfully delivered to Claude. Server returns events
 // strictly after that id in ASC order, so we never miss or replay.
 //
-// Persisted to ${CURSOR_FILE} as a JSON object keyed by workspace_id.
-// Atomic write via temp + rename so a crash mid-write can't corrupt the
-// file (the previous cursor stays valid; worst case is a few replays
-// after the crash, which still beats the v0.1 30-second time-window).
+// Persisted via the base MCP's CursorStore (session-keyed: cursor.json for
+// the primary, cursor.<pid>.json for a concurrent secondary) as a JSON
+// object keyed by workspace_id. Atomic write via temp + rename so a crash
+// mid-write can't corrupt the file (the previous cursor stays valid; worst
+// case is a few replays after the crash, which still beats the v0.1
+// 30-second time-window).
 //
 // Schema:  { "ws-uuid-1": "act-uuid-X", "ws-uuid-2": "act-uuid-Y", ... }
 // Missing key = "first run" → seeds from most-recent without processing.
 // 410 from server = cursor stale → drop key, re-seed on next tick.
-
-const cursors = new Map<string, string>()
 
 // Shared URI cache for chat-upload resolution. Keys are
 // `platform-pending:<ws>/<file_id>` strings — the workspace_id is part
@@ -260,34 +293,15 @@ const cursors = new Map<string, string>()
 // headroom; channel plugin runs in a host shell with less).
 const uriCache = new URICache()
 
-function loadCursors(): void {
-  if (!existsSync(CURSOR_FILE)) return
-  try {
-    const raw = readFileSync(CURSOR_FILE, 'utf8')
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === 'string' && v.length > 0) cursors.set(k, v)
-    }
-  } catch (err) {
-    // Corrupt cursor file = treat as no cursors. Worst case: each watched
-    // workspace re-seeds from now on the next tick (no replay, no message
-    // loss for events arriving AFTER the seed). Don't fail-fast here —
-    // a poller that refuses to start because of one bad file is more
-    // annoying than the recovery cost.
-    process.stderr.write(`molecule channel: cursor file unreadable (${err}); starting fresh\n`)
-  }
-}
-
+// Persist the cursor store, swallowing write errors. CursorStore.save()
+// throws on write failure (so library callers can decide); here — a
+// setInterval poll tick — a throw would be an unhandled rejection, so we
+// log and continue (next successful poll re-saves). Disk-full / readonly-fs
+// surfaces on stderr early.
 function saveCursors(): void {
-  const obj: Record<string, string> = {}
-  for (const [k, v] of cursors) obj[k] = v
-  const tmp = `${CURSOR_FILE}.tmp.${process.pid}`
   try {
-    writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 })
-    renameSync(tmp, CURSOR_FILE)
+    cursorStore.save()
   } catch (err) {
-    // Cursor write failure is recoverable (next successful poll re-saves);
-    // log on stderr so the user sees disk-full / readonly-fs early.
     process.stderr.write(`molecule channel: cursor save failed: ${err}\n`)
   }
 }
@@ -332,7 +346,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   // fields defensively (omit-when-absent via buildChannelMeta).
   url.searchParams.set('include', 'peer_info')
 
-  const cursor = cursors.get(workspaceId)
+  const cursor = cursorStore.get(workspaceId)
   if (cursor) {
     // Steady-state: server returns rows strictly after cursor in ASC order.
     url.searchParams.set('since_id', cursor)
@@ -376,7 +390,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
     // Cursor row is gone (pruned, or never existed if the env var was
     // hand-edited). Drop the cursor; next tick re-seeds from most-recent.
     process.stderr.write(`molecule channel: poll ${workspaceId} cursor stale (410) — re-seeding\n`)
-    cursors.delete(workspaceId)
+    cursorStore.delete(workspaceId)
     saveCursors()
     return
   }
@@ -446,7 +460,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   }
   const newest = activities[activities.length - 1].id
   if (newest !== cursor) {
-    cursors.set(workspaceId, newest)
+    cursorStore.set(workspaceId, newest)
     saveCursors()
   }
 }
@@ -1334,7 +1348,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 // ─── Boot ───────────────────────────────────────────────────────────────
 
-loadCursors()
+// Cursor store is created + loaded during primary election above.
 
 // Compat probe FIRST — before we open the MCP transport or self-register
 // any workspaces. v0.2.1 had this probe AFTER mcp.connect+registerAsPoll,
@@ -1395,7 +1409,7 @@ if (AUTO_REGISTER_POLL) {
 process.stderr.write(
   `molecule channel: connected — watching ${WORKSPACE_IDS.length} workspace(s) across ${new Set(WORKSPACE_TARGETS.map(t => t.platformUrl)).size} platform(s)\n` +
   `  targets: ${formatTargetSummary(WORKSPACE_TARGETS)}\n` +
-  `  delivery_mode=poll  cursor=${CURSOR_FILE}  auto_register=${AUTO_REGISTER_POLL}\n` +
+  `  role=${election.role}  delivery_mode=poll  cursor=${cursorStore.path}  auto_register=${AUTO_REGISTER_POLL}\n` +
   `  poll: every ${POLL_INTERVAL_MS}ms (cursor-based; ${POLL_WINDOW_SECS}s window only used for first-run seed)\n` +
   `  heartbeat: ` +
     (HEARTBEAT_INTERVAL_MS > 0
