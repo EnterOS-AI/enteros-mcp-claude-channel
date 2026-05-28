@@ -2,8 +2,11 @@
 // Pure + dependency-injected, so we exercise every branch without booting
 // server.ts or sending real signals.
 
-import { describe, expect, it } from 'bun:test'
-import { electSession, pidIsAlive } from './session-lock.ts'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { electAndClaimPrimary, electSession, pidIsAlive } from './session-lock.ts'
 
 const ALIVE = () => true
 const DEAD = () => false
@@ -62,6 +65,55 @@ describe('electSession', () => {
     expect(probed).toEqual([]) // own-pid short-circuits before probing
     electSession('1352', spy, OWN)
     expect(probed).toEqual([1352])
+  })
+})
+
+describe('electAndClaimPrimary (atomic claim)', () => {
+  let dir: string
+  let pidFile: string
+  const DEAD = 2_000_000_000
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'session-lock-test-'))
+    pidFile = join(dir, 'bot.pid')
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('no pid file → claims primary and writes own pid', () => {
+    const r = electAndClaimPrimary(pidFile, 12345)
+    expect(r.role).toBe('primary')
+    expect(existsSync(pidFile)).toBe(true)
+    expect(readFileSync(pidFile, 'utf8')).toBe('12345')
+  })
+
+  it('stale file with a dead pid → steals it and claims primary', () => {
+    writeFileSync(pidFile, String(DEAD))
+    const r = electAndClaimPrimary(pidFile, 12345)
+    expect(r.role).toBe('primary')
+    expect(readFileSync(pidFile, 'utf8')).toBe('12345')
+  })
+
+  it('garbage file contents → steals and claims primary', () => {
+    writeFileSync(pidFile, 'not-a-pid')
+    expect(electAndClaimPrimary(pidFile, 12345).role).toBe('primary')
+    expect(readFileSync(pidFile, 'utf8')).toBe('12345')
+  })
+
+  it('a different, LIVE incumbent → yields to secondary and leaves the lock intact', () => {
+    // This very test process is a guaranteed-live pid distinct from ownPid.
+    writeFileSync(pidFile, String(process.pid))
+    const r = electAndClaimPrimary(pidFile, process.pid + 1)
+    expect(r.role).toBe('secondary')
+    expect(r.incumbentPid).toBe(process.pid)
+    expect(r.sessionKey).toBe(String(process.pid + 1))
+    expect(readFileSync(pidFile, 'utf8')).toBe(String(process.pid)) // not overwritten
+  })
+
+  it('our own pid already in the file → reclaims primary (idempotent restart)', () => {
+    writeFileSync(pidFile, '12345')
+    expect(electAndClaimPrimary(pidFile, 12345).role).toBe('primary')
+    expect(readFileSync(pidFile, 'utf8')).toBe('12345')
   })
 })
 

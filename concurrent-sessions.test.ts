@@ -134,6 +134,31 @@ describe('concurrent sessions do not evict each other (#26)', () => {
     expect(pidStillAlive(p1.pid)).toBe(true)
     expect(readFileSync(join(stateDir, 'bot.pid'), 'utf8').trim()).toBe(String(p1.pid))
   }, 20000)
+
+  test('simultaneous cold start elects exactly one primary (atomic claim, no double-primary)', async () => {
+    // Spawn BOTH without waiting for either to boot — races the election/claim
+    // window. With a non-atomic claim both could read no pid file and both
+    // become primary on the shared cursor.json; the exclusive-create claim
+    // guarantees exactly one primary regardless of timing.
+    const a = spawnSession()
+    const b = spawnSession()
+    const aOut = await waitForStderr(a, /role=(primary|secondary)|starting as secondary/)
+    const bOut = await waitForStderr(b, /role=(primary|secondary)|starting as secondary/)
+
+    const roleOf = (out: string): 'primary' | 'secondary' =>
+      /starting as secondary/.test(out) ? 'secondary' : 'primary'
+    const roles = [roleOf(aOut), roleOf(bOut)].sort()
+
+    // The invariant that must hold under any scheduling: one of each, never two primaries.
+    expect(roles).toEqual(['primary', 'secondary'])
+    // And exactly one bot.pid, owned by whichever process won the create.
+    const lockPid = readFileSync(join(stateDir, 'bot.pid'), 'utf8').trim()
+    const primary = roleOf(aOut) === 'primary' ? a : b
+    expect(lockPid).toBe(String(primary.pid))
+    // Both processes are still alive — neither evicted the other.
+    expect(pidStillAlive(a.pid)).toBe(true)
+    expect(pidStillAlive(b.pid)).toBe(true)
+  }, 20000)
 })
 
 function pidStillAlive(pid: number): boolean {

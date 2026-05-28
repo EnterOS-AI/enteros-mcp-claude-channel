@@ -38,7 +38,7 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync, unlinkSync } from 'fs'
+import { readFileSync, mkdirSync, chmodSync, unlinkSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import {
@@ -67,7 +67,7 @@ import { EXTERNAL_WORKSPACE_MCP_TOOLS } from '@molecule-ai/mcp-server/external-w
 // adapters (hermes-ts / codex-ts) via the base MCP — SSOT for the polling
 // cursor contract. See internal#726 + the primary-election logic below.
 import { CursorStore, cursorFileName, pruneOrphanCursors } from '@molecule-ai/mcp-server/session-cursor'
-import { electSession, pidIsAlive } from './session-lock.ts'
+import { electAndClaimPrimary, pidIsAlive } from './session-lock.ts'
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
@@ -190,18 +190,17 @@ function targetForWorkspace(workspaceId: string): WorkspaceTarget {
 //   - secondary → a concurrent session: its own `cursor.<pid>.json`, never
 //                 touches the pid lock, never evicts the primary.
 // Nobody is SIGTERM'd, which also removes the old pid-reuse cross-process-
-// kill hazard. electSession() is a pure helper (see session-lock.ts).
+// kill hazard. The primary claim is an atomic exclusive-create so two
+// simultaneous starts can't both win (see session-lock.ts).
 
-const election = electSession(
-  existsSync(PID_FILE) ? readFileSync(PID_FILE, 'utf8') : null,
-  pidIsAlive,
-  process.pid,
-)
-if (election.role === 'primary') {
-  writeFileSync(PID_FILE, String(process.pid))
-} else {
+// electAndClaimPrimary atomically claims the pid lock when electing primary
+// (exclusive create), so two processes starting in the same instant can never
+// both become primary — exactly one wins the create, the other becomes a
+// secondary. The primary's bot.pid is already written on return.
+const election = electAndClaimPrimary(PID_FILE, process.pid)
+if (election.role === 'secondary') {
   process.stderr.write(
-    `molecule channel: primary poller pid=${election.incumbentPid} already running — ` +
+    `molecule channel: primary poller pid=${election.incumbentPid ?? '?'} already running — ` +
     `starting as secondary (own cursor ${cursorFileName(election.sessionKey)}, no eviction)\n`,
   )
 }
