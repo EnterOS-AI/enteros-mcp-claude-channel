@@ -35,9 +35,14 @@ export interface ElectionResult {
  * Decide whether this process is the primary poller or a secondary.
  *
  * Becomes secondary iff the pid file names a DIFFERENT, currently-alive
- * process. In every other case — no file, empty/garbage contents, a pid <= 1,
+ * process. In every other case — no file, empty/garbage contents, a pid < 1,
  * our own pid, or a dead incumbent (crash/SIGKILL left a stale pid) — this
  * process becomes primary and should claim the lock.
+ *
+ * pid 1 IS valid: in a minimal container the poller itself can run as pid 1,
+ * so a live incumbent of pid 1 must be honored (not stolen) — hence `>= 1`,
+ * not `> 1`. (The atomic exclusive-create claim is the real anti-double-primary
+ * guard regardless; this just avoids needlessly stealing a live pid-1 lock.)
  *
  * Note: a primary is never killed here. The only risk is pid reuse — a dead
  * incumbent whose pid was recycled by an unrelated live process reads as
@@ -53,7 +58,7 @@ export function electSession(
   const incumbent = pidFileContents == null ? NaN : parseInt(pidFileContents.trim(), 10)
   const hasLiveIncumbent =
     Number.isInteger(incumbent) &&
-    incumbent > 1 &&
+    incumbent >= 1 &&
     incumbent !== ownPid &&
     isAlive(incumbent)
 
@@ -76,6 +81,12 @@ export function electSession(
  * retries; on unresolved contention we yield to secondary rather than risk a
  * second primary (worst case: this session doesn't resume from the shared
  * cursor — strictly safe).
+ *
+ * Vacant-primary note: if the primary dies while a secondary keeps running,
+ * nobody promotes — the secondary stays on its own cursor and `bot.pid` points
+ * at a dead pid until the next fresh boot claims it (and resumes the shared
+ * cursor). That's benign: live secondaries keep delivering; only "resume from
+ * the shared cursor" is deferred to the next cold start.
  */
 export function electAndClaimPrimary(pidFile: string, ownPid: number): ElectionResult {
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -91,7 +102,7 @@ export function electAndClaimPrimary(pidFile: string, ownPid: number): ElectionR
       // Lost the create race, or a stale file is present. Re-read and decide.
       const cur = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : null
       const incumbent = parseInt((cur ?? '').trim(), 10)
-      if (Number.isInteger(incumbent) && incumbent > 1 && incumbent !== ownPid && pidIsAlive(incumbent)) {
+      if (Number.isInteger(incumbent) && incumbent >= 1 && incumbent !== ownPid && pidIsAlive(incumbent)) {
         return { role: 'secondary', sessionKey: String(ownPid), incumbentPid: incumbent }
       }
       // Held by a dead/garbage pid (or our own stale file) — clear it and retry.
@@ -107,7 +118,7 @@ export function electAndClaimPrimary(pidFile: string, ownPid: number): ElectionR
 
 /** Liveness probe via signal 0 — true if the pid exists and we can signal it. */
 export function pidIsAlive(pid: number): boolean {
-  if (!(Number.isInteger(pid) && pid > 1)) return false
+  if (!(Number.isInteger(pid) && pid >= 1)) return false
   try {
     process.kill(pid, 0)
     return true
