@@ -70,3 +70,23 @@ start.
 `~/.claude/channels/molecule/`): `bot.pid` (primary lock), `cursor.json`
 (primary cursor), `cursor.<pid>.json` (secondary cursors), `inbox/` (resolved
 chat-upload bytes), `.env` (tokens, mode 0600).
+
+---
+
+## My Chat reply doesn't show up / canvas stuck on "Processing with external…"
+
+You send a message from a workspace's **My Chat**, the agent (this channel)
+replies via `reply_to_workspace`, but My Chat keeps spinning on `Processing
+with external…` and the reply never appears.
+
+**This is a canvas UI staleness issue, not a delivery failure.** A
+canvas-user reply is `POST /workspaces/:id/notify` and lands server-side
+regardless — the My Chat panel just doesn't always live-update an external
+agent's reply. **Refresh the canvas and the reply appears.**
+
+How to confirm it's staleness and not a real drop: the `reply_to_workspace`
+tool returns `Replied to canvas user as <id> via /notify` (that's "request
+accepted", not "rendered"), and the `notify` row is recorded in the
+workspace's `/activity` feed (method=`notify`). If both are true, the
+message is delivered and only the canvas view is stale. (The live-update gap
+is a canvas concern, tracked separately from this channel.)
