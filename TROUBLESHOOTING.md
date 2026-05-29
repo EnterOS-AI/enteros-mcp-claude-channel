@@ -50,8 +50,8 @@ singleton SIGTERM'd the other poller). Instead each process elects a role:
 - **primary** — claims the `bot.pid` lock and uses the shared `cursor.json`,
   so a single-session restart resumes from where it left off.
 - **secondary** — a concurrent session: its own `cursor.<pid>.json`, never
-  touches the lock, never evicts the primary. The startup log says
-  `starting as secondary (own cursor cursor.<pid>.json, no eviction)`.
+  touches the lock, never evicts the primary. The startup log line is
+  `molecule channel: primary poller pid=<N> already running — starting as secondary (own cursor cursor.<pid>.json, no eviction)`.
 
 Both sessions independently receive the workspace's A2A activity (the platform
 is fully concurrent on a workspace — register/heartbeat are workspace-keyed
