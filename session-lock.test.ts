@@ -27,11 +27,17 @@ describe('electSession', () => {
     }
   })
 
-  it('pid <= 1 is never treated as a live incumbent → primary', () => {
-    // 0/1 are not real evictable pollers (1 is init); negative is garbage.
-    for (const raw of ['0', '1', '-5']) {
+  it('pid < 1 (0, negative) is never a live incumbent → primary', () => {
+    for (const raw of ['0', '-5']) {
       expect(electSession(raw, ALIVE, OWN).role).toBe('primary')
     }
+  })
+
+  it('pid 1 IS valid (containerized poller as init) — live → secondary, dead → primary', () => {
+    // A minimal-container poller can run as pid 1; a live pid-1 incumbent must
+    // be honored, not stolen. (Regression for the `> 1` guard.)
+    expect(electSession('1', ALIVE, OWN)).toEqual({ role: 'secondary', sessionKey: String(OWN), incumbentPid: 1 })
+    expect(electSession('1', DEAD, OWN).role).toBe('primary')
   })
 
   it('our own pid in the file → primary (we already own the lock)', () => {
