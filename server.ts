@@ -759,7 +759,7 @@ const mcp = new Server(
   {
     capabilities: SERVER_CAPABILITIES,
     instructions: [
-      'Messages from Molecule arrive as channel messages with source="molecule". If the meta has image_path or attachment_path, Read that local path before responding when the file matters.',
+      'Messages from Molecule arrive as channel messages with source="molecule". If the meta has image_path or attachment_path (and attachment_2_path, attachment_3_path, … for additional files), Read each local path before responding when the file matters.',
       'Reply to the sender with reply_to_workspace. The workspace_id or peer_id in the channel metadata identifies the route.',
     ].join('\n'),
   },
