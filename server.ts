@@ -841,8 +841,13 @@ async function replyToWorkspace(args: z.infer<typeof ReplyArgsSchema>): Promise<
     method: 'message/send',
     params: {
       message: {
+        // A2A v0.3 requires `role` on the message; omitting it makes the
+        // peer's pydantic SendMessageRequest reject with -32600 (#2251).
+        // Part discriminator is `kind` in v0.3 (`type` was tolerated but
+        // not canonical) — emit the spec field.
+        role: 'user',
         messageId: crypto.randomUUID(),
-        parts: [{ type: 'text', text: args.text }],
+        parts: [{ kind: 'text', text: args.text }],
       },
     },
   }
@@ -1099,8 +1104,11 @@ async function delegateTask(args: z.infer<typeof DelegateTaskArgsSchema>): Promi
     method: 'message/send',
     params: {
       message: {
+        // A2A v0.3 requires `role`; without it the peer rejects with -32600
+        // (#2251). Part discriminator is `kind` in v0.3.
+        role: 'user',
         messageId: crypto.randomUUID(),
-        parts: [{ type: 'text', text: args.task }],
+        parts: [{ kind: 'text', text: args.task }],
       },
     },
   }
