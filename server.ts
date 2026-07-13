@@ -68,6 +68,7 @@ import { EXTERNAL_WORKSPACE_MCP_TOOLS } from '@molecule-ai/mcp-server/external-w
 // cursor contract. See internal#726 + the primary-election logic below.
 import { CursorStore, cursorFileName, pruneOrphanCursors } from '@molecule-ai/mcp-server/session-cursor'
 import { electAndClaimPrimary, pidIsAlive } from './session-lock.ts'
+import { parseEnvFile } from './env-file.ts'
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
@@ -86,9 +87,8 @@ mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 try {
   // Token is a credential — lock to owner. No-op on Windows (would need ACLs).
   chmodSync(ENV_FILE, 0o600)
-  for (const line of readFileSync(ENV_FILE, 'utf8').split('\n')) {
-    const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+  for (const [key, value] of Object.entries(parseEnvFile(readFileSync(ENV_FILE, 'utf8')))) {
+    if (process.env[key] === undefined) process.env[key] = value
   }
 } catch {
   // Missing .env on first run is fine; we'll fail loudly below if required vars are absent.
