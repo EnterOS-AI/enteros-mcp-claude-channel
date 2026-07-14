@@ -12,7 +12,7 @@
 //   last_heartbeat_at via registry.go:369) but never heartbeated again.
 //   Within 90s of plugin start the row goes stale, the canvas badge
 //   flips to `awaiting_agent`, and the workspace looks offline even
-//   though A2A traffic flows fine over the long-poll loop.
+//   though A2A traffic flows fine over the interval poll loop.
 //
 //   /workspaces/:id/activity GET (the poll loop) is read-only on the
 //   platform side — it does NOT touch presence. /registry/heartbeat is

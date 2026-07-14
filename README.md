@@ -4,7 +4,7 @@ Claude Code channel plugin for [Molecule AI](https://moleculesai.app). Bridges M
 
 ## What it does
 
-When you launch Claude Code with this plugin enabled and configure it to watch one or more Molecule workspaces, every A2A message your watched workspaces receive shows up in the session as a user-turn. You reply normally; the plugin's MCP `reply_to_workspace` tool sends the response back through Molecule.
+When you launch Claude Code with this plugin enabled and configure it to watch one or more Molecule workspaces, every A2A message your watched workspaces receive shows up in the session as a user-turn. You reply normally; the plugin's MCP `reply_to_workspace` tool sends the response back through Molecule. Claude can also initiate peer work with `delegate_task` / `delegate_task_async` and start a canvas conversation with `send_message_to_user`.
 
 ```
 Molecule peer ──A2A──> [your workspace] ──poll──> [this plugin] ──MCP notification──> Claude Code session
@@ -12,7 +12,7 @@ Molecule peer ──A2A──> [your workspace] ──poll──> [this plugin] 
                                   └────────── POST /workspaces/:id/a2a ◄── reply_to_workspace tool ──┘
 ```
 
-No tunnel. No public endpoint. The plugin self-registers each watched workspace as `delivery_mode=poll` on startup and then long-polls `/workspaces/:id/activity?since_id=<cursor>` for new A2A traffic. Replies POST back to `/workspaces/:peer_id/a2a` via the same bearer token. A single plugin instance can watch workspaces on one or more Molecule tenant URLs.
+No tunnel. No public endpoint. The plugin self-registers each watched workspace as `delivery_mode=poll` on startup and polls `/workspaces/:id/activity?since_id=<cursor>` for new A2A traffic at the configured interval. Replies POST back to `/workspaces/:peer_id/a2a` via the same bearer token. A single plugin instance can watch workspaces on one or more Molecule tenant URLs.
 
 ## Install
 
@@ -28,7 +28,7 @@ claude plugin install molecule@molecule-channel
 
 `molecule` is the plugin name (from `.claude-plugin/plugin.json`); `molecule-channel` is the marketplace name (from `.claude-plugin/marketplace.json`). Both live in the same repo — installing the marketplace makes the plugin available; installing the plugin enables it for your sessions.
 
-To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.4`. Without a ref, you track `main`.
+To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.9`. Without a ref, you track `main`.
 
 Alternatively, to load the channel for a single session without a persistent
 marketplace install (useful for a quick try, or in CI), pass the channel spec
@@ -140,7 +140,7 @@ MOLECULE_WORKSPACE_TOKENS=tok-1,tok-2
 
 # Optional
 MOLECULE_POLL_INTERVAL_MS=5000     # default 5s
-MOLECULE_POLL_WINDOW_SECS=30       # default 30s — only used to seed the first-run cursor
+MOLECULE_POLL_WINDOW_SECS=30       # default 30s — cold-start backfill window
 MOLECULE_AGENT_NAME="Claude Code (channel)"           # how the workspace appears in canvas
 MOLECULE_AGENT_DESC="Local Claude Code session..."
 MOLECULE_AUTO_REGISTER_POLL=true   # set to "false" if you've configured the workspace another way
@@ -152,7 +152,7 @@ first-launch pairing handshake — the placeholder `tok-1,tok-2` must be replace
 with real workspace-scoped bearer tokens that you mint yourself (one per
 workspace id, same order). There are exactly two ways to obtain a token, both
 covered in [Getting workspace_id + token](#getting-workspace_id--token) below:
-mint it in the Canvas UI (Settings → Auth tokens → **Create channel token**), or
+mint it in the Canvas UI (Settings → **Workspace Tokens** → **+ New Token**), or
 `POST` to the admin tokens endpoint. The channel will not start while this
 value is empty or placeholder.
 
@@ -190,7 +190,7 @@ Every Molecule workspace has a workspace-scoped bearer that authenticates agains
 ### From Canvas (recommended)
 
 1. Open the workspace in Canvas
-2. Settings tab → "Auth tokens" → **Create channel token**
+2. Settings → **Workspace Tokens** → **+ New Token**
 3. Copy the workspace_id (UUID at the top) and the token (shown once)
 
 ### From the API
@@ -202,7 +202,7 @@ curl -X POST "$PLATFORM_URL/admin/workspaces/$WORKSPACE_ID/tokens" \
   -d '{"label": "claude-channel"}'
 ```
 
-## How replies work
+## Replies and new outbound conversations
 
 When a peer's message lands in your session, the meta block carries the routing data Claude needs:
 
@@ -225,6 +225,8 @@ When a peer's message lands in your session, the meta block carries the routing 
 ```
 
 Claude can call `reply_to_workspace({peer_id, text})` to send the response back. If only one workspace is watched, `workspace_id` is implicit. Multi-workspace setups need the watched id explicitly.
+
+Outbound initiation does not need a separate `start_workspace_chat` tool. Use `delegate_task` for a synchronous peer request, `delegate_task_async` plus `check_task_status` for longer peer work, or `send_message_to_user` to start a message in the watched workspace's canvas chat. These tools share the universal external-workspace MCP contract; `_as_workspace` selects the sender when the plugin watches more than one workspace.
 
 ## Coexistence with the universal MCP wheel
 
@@ -261,8 +263,8 @@ one independently.
 
 ### Channel runs but no messages arrive
 
-Everything looks healthy — the bun poller runs, `cursor.json` advances,
-`activity_id`s are acked — but no peer message ever reaches the conversation.
+Everything looks healthy — the bun poller runs and `cursor.json` advances —
+but no peer message ever reaches the conversation.
 This is almost always the channel being **blocked by org policy**: when channels
 are disallowed the host still lets the poll loop run and silently drops inbound
 messages instead of delivering them.
@@ -279,8 +281,8 @@ To fix:
   `channelsEnabled: true` and the `allowedChannelPlugins` entry — see
   [Team / Enterprise plans](#allowing-the-channel-via-allowedchannelplugins)
   above for the exact `sudo tee` command and per-OS paths.
-- **Pro / Max plan:** verify the user-side `channelsEnabled` in
-  `~/.claude/settings.json`, then confirm the host actually picked it up:
+- **Pro / Max plan:** verify the managed-settings file contains the object-form
+  `allowedChannelPlugins` entry, then confirm the host actually picked it up:
 
   ```bash
   claude --debug 2>&1 | grep -i channel
@@ -314,33 +316,32 @@ v0.2 switched from a v0.1-style time-window dedup (`since_secs=30` + in-memory s
 ```
 GET /workspaces/:id/activity?since_id=<last-delivered>&limit=100
   → ASC-ordered rows strictly after the cursor
-  → 410 Gone if the cursor row was pruned (plugin re-seeds automatically)
+  → 410 Gone if the cursor row was pruned (plugin restarts bounded backfill)
 ```
 
-The cursor is persisted to `~/.claude/channels/molecule/cursor.json` (`chmod 600`, atomic temp+rename writes), so a restart resumes exactly where the previous session left off — no replay window, no missed messages, no growing in-memory dedup set.
+The cursor is persisted to `~/.claude/channels/molecule/cursor.json` (`chmod 600`, atomic temp+rename writes), so a normal restart resumes after the newest activity processed by the previous session without a growing in-memory dedup set. Notification delivery is best-effort; a crash before the atomic cursor save can replay the last batch, while an MCP notification failure is logged and does not stall later traffic.
 
-`MOLECULE_POLL_WINDOW_SECS` is only used to seed the first-ever cursor for a workspace: on the very first poll the plugin asks for the most-recent event in that window and remembers its id WITHOUT delivering it (events that arrived BEFORE you started this Claude session are out of context). Every subsequent poll uses the cursor.
+`MOLECULE_POLL_WINDOW_SECS` is the bounded cold-start backfill window and must be a positive integer. When a workspace has no cursor, the first poll fetches and delivers the newest **up to 100** matching events in that window in chronological order, then advances the cursor past the newest row. If more than 100 matching events arrived during the window, the older overflow is outside this plugin's cold-start recovery guarantee. This preserves a bounded backlog queued during a short Claude Code restart without replaying an unbounded history. Every subsequent poll uses `since_id`; steady-state batches page forward on later ticks rather than dropping overflow.
 
-### Singleton lock
+### Concurrent sessions and primary election
 
-Only one channel server can poll a given workspace set at a time — multiple instances would race the dedup state and double-deliver. The plugin maintains a PID file at `~/.claude/channels/molecule/bot.pid` and on startup kills any stale predecessor (matches the telegram channel pattern).
+Multiple Claude Code sessions may watch the same workspace without evicting one another. The first process atomically claims `~/.claude/channels/molecule/bot.pid` as the primary and uses the shared `cursor.json`; a live incumbent makes later processes secondaries with their own `cursor.<pid>.json`. No live predecessor is signalled or killed. A dead or invalid PID file is reclaimed, and orphaned secondary cursor files are pruned.
 
 ### File attachments
 
-A2A messages can carry `Part` entries with `url` and `media_type`. The MVP delivers attachments by-reference (URL surfaces in the meta block, Claude can fetch via the workspace_secrets-scoped token); inline image-content delivery (mirroring telegram's `image_path` mechanism) is a v0.2 feature.
+A2A messages can carry file, image, and audio parts. For staged chat uploads, the activity feed first exposes a `platform-pending:` URI; the plugin authenticates to the pending-upload endpoint, downloads the bytes into `~/.claude/channels/molecule/inbox/`, rewrites the message to a local `file://` URI, and exposes local `attachment_path` fields (plus `image_path` for the first downloaded image). Claude is instructed to read those local paths before responding. If download fails, or an older sender supplies a different URI shape, delivery remains best-effort and the unresolved URI is shown by reference instead of dropping the message.
 
-## Limitations (v0.2)
+## Current limitations
 
-- **Polling-only inbound.** Latency floor is `MOLECULE_POLL_INTERVAL_MS` (default 5s). Push mode is still possible by setting `MOLECULE_AUTO_REGISTER_POLL=false` and configuring the workspace with `delivery_mode=push` + a routable URL via canvas.
+- **Polling-only inbound.** Latency floor is `MOLECULE_POLL_INTERVAL_MS` (default 5s). `MOLECULE_AUTO_REGISTER_POLL=false` only suppresses the startup registration upsert; it does not add a push listener. A push-mode external agent needs a separate routable A2A server rather than this channel process.
 - **No pairing flow.** Tokens are configured manually via `.env`; no canvas-side approval handshake.
-- **No file-attachment download.** URLs surface in the meta block; the host fetches on-demand.
-- **No outbound channel-init.** The plugin only sends replies (in response to inbound A2A); starting a fresh A2A conversation initiated FROM the channel side requires a future `start_workspace_chat` tool.
+- **Best-effort attachment fallback.** Authenticated `platform-pending:` uploads are downloaded locally; other URI forms remain by-reference when the plugin cannot resolve them.
 
 ## Compatibility
 
 - **molecule-runtime/workspace-server**: requires `delivery_mode=poll` support (`/registry/register` + a2a_proxy short-circuit, molecule-core PRs #2348 + #2353) and the `since_id` cursor on `GET /activity` (PR #2354). All three shipped under issue #2339, available staging-onward. The plugin probes for cursor support on startup (sends a known-invalid UUID, expects `410 Gone`) and exits with code 2 if the platform predates PR #2354 — silent re-delivery is a worse failure mode than failing to start. `401`/`403`/`404`/`5xx` from the probe are treated as inconclusive (orthogonal to cursor support — usually a token, workspace_id, or transient-network issue) and the plugin continues to the poll loop where the real failure surfaces with workspace-level context.
 - **Claude Code**: tested against the channel-plugin contract that expects `notifications/claude/channel` with `{content, meta}` (matches `@claude-plugins-official/telegram` v0.0.6).
-- **bun**: the MCP server runs under bun for fast startup; `package.json` `start` does `bun install --no-summary && bun server.ts` so no global install needed.
+- **bun**: the MCP server runs under bun for fast startup; `package.json` `start` does `([ -d node_modules ] || bun install --no-summary) && bun server.ts`, so dependencies install on a fresh checkout and stay off subsequent MCP-start hot paths.
 
 ## Contributing
 
