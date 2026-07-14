@@ -7,7 +7,8 @@
  *
  * Inbound (A2A → Claude turn): polls each watched workspace's activity feed
  * with `since_id=<cursor>` in steady state and a bounded `since_secs=N`
- * cold-start backfill when no cursor exists. Each new event becomes an MCP
+ * cold-start backfill (newest 100 rows at most) when no cursor exists. Each
+ * fetched event becomes an MCP
  * `notifications/claude/channel`. This process is intentionally polling-only:
  * it needs no tunnel or public inbound URL.
  *
@@ -103,6 +104,7 @@ try {
 }
 const WORKSPACE_IDS = WORKSPACE_TARGETS.map(t => t.workspaceId)
 const POLL_INTERVAL_MS = parseInt(process.env.MOLECULE_POLL_INTERVAL_MS ?? '5000', 10)
+const ACTIVITY_BATCH_LIMIT = 100
 // POLL_WINDOW_SECS bounds cold-start backfill when a workspace has no cursor.
 // Those rows are delivered before the newest id is persisted; after that,
 // since_id drives every steady-state poll. Older versions used since_secs as
@@ -252,8 +254,10 @@ process.on('uncaughtException', err => {
 // One independent poll loop per watched workspace. With a persisted cursor,
 // the loop requests rows strictly after that activity id via `since_id`. With
 // no cursor, it requests a bounded `since_secs=POLL_WINDOW_SECS` cold-start
-// backfill, delivers those rows in ascending order, and persists the newest
-// id. There is no in-memory seen-id set or overlapping steady-state window.
+// backfill, delivers up to ACTIVITY_BATCH_LIMIT newest matching rows in
+// ascending order, and persists the newest id. Older overflow in a cold-start
+// window cannot be paged backward by this cursor API and is not recovered.
+// There is no in-memory seen-id set or overlapping steady-state window.
 
 // ActivityEntry lives in extract-text.ts (imported above) so unit
 // tests can import the type + helper without triggering server.ts's
@@ -338,7 +342,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   const { token, platformUrl } = target
   const url = new URL(`${platformUrl}/workspaces/${workspaceId}/activity`)
   url.searchParams.set('type', 'a2a_receive')
-  url.searchParams.set('limit', '100')
+  url.searchParams.set('limit', String(ACTIVITY_BATCH_LIMIT))
   // include=peer_info opts into Layer 1's row-level projection:
   //   peer_name / peer_role / agent_card_url (when source_id resolves to a workspace)
   //   user_name / user_email (canvas-auth — once RFC#637 / CP IAM ships)
@@ -354,8 +358,9 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
     // Steady-state: server returns rows strictly after cursor in ASC order.
     url.searchParams.set('since_id', cursor)
   } else {
-    // First run for this workspace — deliver every event in the POLL_WINDOW_SECS
-    // backfill window, then advance the cursor past the newest. The previous
+    // First run for this workspace — deliver the newest ACTIVITY_BATCH_LIMIT
+    // events in the POLL_WINDOW_SECS backfill window, then advance the cursor
+    // past the newest. The previous
     // policy was seed-then-skip on the assumption that pre-session events
     // were "out of context", but operators routinely restart Claude Code
     // mid-conversation and EXPECT the queued message to be delivered (otherwise
@@ -761,7 +766,7 @@ export const SERVER_CAPABILITIES = {
 } as const
 
 const mcp = new Server(
-  { name: 'molecule', version: '0.4.0-gitea.8' },
+  { name: 'molecule', version: '0.4.0-gitea.9' },
   {
     capabilities: SERVER_CAPABILITIES,
     instructions: [

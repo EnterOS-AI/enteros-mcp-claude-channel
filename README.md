@@ -28,7 +28,7 @@ claude plugin install molecule@molecule-channel
 
 `molecule` is the plugin name (from `.claude-plugin/plugin.json`); `molecule-channel` is the marketplace name (from `.claude-plugin/marketplace.json`). Both live in the same repo — installing the marketplace makes the plugin available; installing the plugin enables it for your sessions.
 
-To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.8`. Without a ref, you track `main`.
+To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.9`. Without a ref, you track `main`.
 
 Alternatively, to load the channel for a single session without a persistent
 marketplace install (useful for a quick try, or in CI), pass the channel spec
@@ -321,7 +321,7 @@ GET /workspaces/:id/activity?since_id=<last-delivered>&limit=100
 
 The cursor is persisted to `~/.claude/channels/molecule/cursor.json` (`chmod 600`, atomic temp+rename writes), so a normal restart resumes after the newest activity processed by the previous session without a growing in-memory dedup set. Notification delivery is best-effort; a crash before the atomic cursor save can replay the last batch, while an MCP notification failure is logged and does not stall later traffic.
 
-`MOLECULE_POLL_WINDOW_SECS` is the bounded cold-start backfill window and must be a positive integer. When a workspace has no cursor, the first poll fetches and delivers every matching event in that window, then advances the cursor past the newest row. This preserves messages queued during a short Claude Code restart without replaying an unbounded history. Every subsequent poll uses `since_id`.
+`MOLECULE_POLL_WINDOW_SECS` is the bounded cold-start backfill window and must be a positive integer. When a workspace has no cursor, the first poll fetches and delivers the newest **up to 100** matching events in that window in chronological order, then advances the cursor past the newest row. If more than 100 matching events arrived during the window, the older overflow is outside this plugin's cold-start recovery guarantee. This preserves a bounded backlog queued during a short Claude Code restart without replaying an unbounded history. Every subsequent poll uses `since_id`; steady-state batches page forward on later ticks rather than dropping overflow.
 
 ### Concurrent sessions and primary election
 

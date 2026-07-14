@@ -13,6 +13,12 @@ const testSetupSource = await Bun.file(new URL('./tests/setup.ts', import.meta.u
 const packageJson = await Bun.file(new URL('./package.json', import.meta.url)).json() as {
   version: string
 }
+const pluginJson = await Bun.file(new URL('./.claude-plugin/plugin.json', import.meta.url)).json() as {
+  version: string
+}
+const marketplaceJson = await Bun.file(new URL('./.claude-plugin/marketplace.json', import.meta.url)).json() as {
+  plugins: Array<{ version: string }>
+}
 const moduleComment = serverSource.slice(0, serverSource.indexOf('*/') + 2)
 
 describe('README current-behavior contract', () => {
@@ -35,6 +41,9 @@ describe('README current-behavior contract', () => {
 
   test('describes cold-start delivery and the conditional dependency install', () => {
     expect(readme).toMatch(/cold-start backfill/i)
+    expect(readme).toContain('up to 100')
+    expect(readme).not.toContain('delivers every matching event')
+    expect(serverSource).toContain('const ACTIVITY_BATCH_LIMIT = 100')
     expect(readme).not.toContain('remembers its id WITHOUT delivering it')
     expect(readme).toContain('[ -d node_modules ] || bun install --no-summary')
     expect(readme).not.toContain('no missed messages')
@@ -86,6 +95,9 @@ describe('server module comment current-behavior contract', () => {
   test('keeps operator-facing version references aligned with the package', () => {
     expect(serverSource).toContain(`{ name: 'molecule', version: '${packageJson.version}' }`)
     expect(readme).toContain(`#v${packageJson.version}`)
+    expect(pluginJson.version).toBe(packageJson.version)
+    expect(marketplaceJson.plugins).toHaveLength(1)
+    expect(marketplaceJson.plugins[0]?.version).toBe(packageJson.version)
   })
 })
 
