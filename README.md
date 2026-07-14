@@ -229,9 +229,10 @@ Claude can call `reply_to_workspace({peer_id, text})` to send the response back.
 ## Coexistence with the universal MCP wheel
 
 If you previously wired Molecule into Claude Code via the universal MCP wheel
-(`uv tool install molecule-ai-workspace-runtime` followed by a
-`claude mcp add molecule-<workspace-slug>` line stamped by the Canvas
-modal — or, on pre-mc#1535 versions, a bare `claude mcp add molecule`),
+(the current internal `molecules-workspace-runtime` distribution, or the
+retired public `molecule-ai-workspace-runtime` distribution) followed by a
+`claude mcp add molecule-<workspace-slug>` line stamped by the Canvas modal —
+or, on pre-mc#1535 versions, a bare `claude mcp add molecule` —
 **both** integrations register and you end up with two overlapping MCP
 tool namespaces in the same session — the wheel's `mcp__molecule__*` and
 this plugin's `mcp__plugin_molecule_molecule__*`. The duplicate tools
