@@ -79,8 +79,8 @@ describe('shouldEmitActivity — P1 outbound /notify echo filter', () => {
   })
 
   test('emits null-method rows (inbound, method missing on platform side)', () => {
-    // Defensive: platform older than #2354 may have null method on some
-    // rows; deliver them rather than silently dropping. canvas_user
+    // Defensive: older platform rows may have a null method; deliver them
+    // rather than silently dropping. canvas_user
     // classification will fall back to "no peer_id" → treat as canvas-user.
     expect(shouldEmitActivity(make(null))).toBe(true)
   })

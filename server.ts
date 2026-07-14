@@ -48,13 +48,10 @@ import {
   type ActivityEntry,
   type ActivityAttachment,
 } from './extract-text.ts'
-// Layer C of RFC#640's 4-layer upload-resolution cascade — consume the
-// base MCP's resolvePendingUpload / URICache / rewritePendingURIs helpers
-// instead of re-implementing inbox_uploads.py semantics in TS. The base
-// MCP's inbox-uploads module is the SSOT-aligned shared implementation
-// across all TS adapters (channel + future hermes-ts / codex-ts etc.).
-// See feedback_three_layer_data_responsibility_platform_base_adaptor +
-// internal#640 spec MANDATORY contract section.
+// Consume the base MCP's resolvePendingUpload / URICache /
+// rewritePendingURIs helpers instead of re-implementing inbox_uploads.py
+// semantics in TS. The base MCP's inbox-uploads module is the shared
+// implementation across TS adapters (channel + future hermes-ts / codex-ts).
 import {
   resolvePendingUpload,
   URICache,
@@ -75,10 +72,8 @@ import { electAndClaimPrimary, pidIsAlive } from './session-lock.ts'
 const STATE_DIR = process.env.MOLECULE_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'molecule')
 const ENV_FILE = join(STATE_DIR, '.env')
 const PID_FILE = join(STATE_DIR, 'bot.pid')
-// Where chat-upload bytes get cached after resolvePendingUpload — per
-// RFC#640's spec the adapter picks an adapter-specific path; this is
-// the Claude Code channel's choice (matches the path documented in the
-// Layer A spec section for this adapter).
+// Where chat-upload bytes get cached after resolvePendingUpload. The adapter
+// owns this local path; README.md documents it for operators.
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 // Load ~/.claude/channels/molecule/.env into process.env. Real env wins.
@@ -435,7 +430,7 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   if (activities.length === 0) return
   for (const act of activities) {
     if (!shouldEmitActivity(act)) continue
-    // Upload resolution (RFC#640 5-step MANDATORY contract step 1-4):
+    // Pending-upload resolution before channel delivery:
     // chat_upload_receive rows have lower activity_logs.id than the
     // message that references their `platform-pending:` URI (per the
     // Python reference comment in inbox_uploads.py:23-32), so by the
@@ -477,14 +472,14 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
 
 // ─── Cursor-support probe (startup compat check) ──────────────────────
 //
-// v0.2 relies on the since_id cursor on /activity (Molecule-AI/molecule-core
-// PR #2354). Older platforms silently ignore the query param and return
+// v0.2 relies on the since_id cursor on /activity. Older platforms silently
+// ignore the query param and return
 // whatever the default time window covers, which would make us re-deliver
 // the same activities on every tick — a worse silent-duplicate bug than
 // any failure mode v0.1 had.
 //
-// Detect at startup with a known-invalid UUID. PR-#2354+ answers 410 Gone
-// for any cursor that doesn't resolve to an activity_logs row. Pre-#2354
+// Detect at startup with a known-invalid UUID. Compatible platforms answer
+// 410 Gone for a cursor that doesn't resolve to an activity_logs row; older
 // servers ignore the param and answer 200 OK. We use the all-zero UUID
 // because gen_random_uuid() will never produce it (per RFC 4122 §4.4 the
 // version + variant bits are non-zero), so a 410 is unambiguous.
@@ -528,7 +523,7 @@ async function probeCursorSupport(workspaceId: string): Promise<'ok' | 'too_old'
 // ─── Register-as-poll (startup self-register) ──────────────────────────
 //
 // On startup, register each watched workspace with delivery_mode=poll so
-// the platform's a2a_proxy short-circuits to activity_logs (PR 2 / #2353)
+// the platform's a2a_proxy short-circuits to activity_logs
 // instead of trying to dispatch HTTP to a URL the operator's laptop
 // doesn't have. Idempotent — the upsert in /registry/register's handler
 // preserves existing values; we just declare delivery_mode and the
@@ -579,7 +574,7 @@ async function registerAsPoll(workspaceId: string): Promise<void> {
     if (j.delivery_mode && j.delivery_mode !== 'poll') {
       process.stderr.write(
         `molecule channel: register-as-poll ${workspaceId} returned delivery_mode=${j.delivery_mode} ` +
-        `(expected poll). Platform may predate #2339.\n`
+        `(expected poll). Platform may not support poll-mode registration.\n`
       )
     }
   } catch {
@@ -981,7 +976,7 @@ const GetWorkspaceInfoArgsSchema = z.object({
 
 // Pure formatter — kept exportable so server.test.ts can pin the
 // message shape without mocking fetch + resolveWatching just to read
-// one string. molecule-core#2429.
+// one string.
 export function formatRemovedWorkspaceError(
   workspaceId: string,
   body: { id?: string; removed_at?: string; hint?: string } | null | undefined,
@@ -1001,7 +996,7 @@ async function getWorkspaceInfo(args: z.infer<typeof GetWorkspaceInfoArgsSchema>
     signal: AbortSignal.timeout(15_000),
   })
   if (resp.status === 410) {
-    // molecule-core#2429: platform returns 410 Gone when status='removed'.
+    // The platform returns 410 Gone when status='removed'.
     // Surface a clear "your workspace was deleted, re-onboard" error
     // instead of a generic HTTP error — without this branch the operator
     // sees `get_workspace_info failed: HTTP 410` and has to guess why.
@@ -1049,7 +1044,8 @@ async function sendMessageToUser(args: z.infer<typeof SendMessageToUserArgsSchem
   const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   let attachmentRefs: unknown[] = []
   if (args.attachments && args.attachments.length > 0) {
-    // Multipart upload — same shape as workspace/a2a_tools.py:_upload_chat_files.
+    // Multipart upload — same shape as
+    // molecule_runtime/a2a_tools_messaging.py:_upload_chat_files.
     // The platform stages files under /workspace/.molecule/chat-uploads (a
     // canvas "allowed root") and returns metadata the notify body references.
     const form = new FormData()
@@ -1159,9 +1155,10 @@ async function delegateTaskAsync(args: z.infer<typeof DelegateTaskAsyncArgsSchem
   const { workspaceId, token, platformUrl } = resolveWatching(args._as_workspace)
   if (!args.workspace_id) throw new Error('workspace_id (target peer) is required')
   if (!args.task) throw new Error('task is required')
-  // Idempotency key: SHA-256 of (target, task) so a restart firing the same
-  // delegation gets the existing delegation_id back instead of creating a
-  // duplicate (mirrors workspace/a2a_tools.py — fixes #1456 there).
+  // Channel-local idempotency key: SHA-256 of (target, task), so a restart
+  // firing the same delegation gets the existing delegation_id instead of a
+  // duplicate. Core scopes idempotency rows to the caller workspace from the
+  // request route, so the source workspace need not be repeated in this hash.
   const idem = (await sha256Hex(`${args.workspace_id}:${args.task}`)).slice(0, 32)
   const resp = await fetch(`${platformUrl}/workspaces/${workspaceId}/delegate`, {
     method: 'POST',
@@ -1239,7 +1236,7 @@ async function commitMemory(args: z.infer<typeof CommitMemoryArgsSchema>): Promi
       content: args.content,
       scope: (args.scope ?? 'LOCAL').toUpperCase(),
       // Platform cross-validates this against the bearer for namespace
-      // isolation (workspace-server fix for GH#1610).
+      // isolation.
       workspace_id: workspaceId,
     }),
     signal: AbortSignal.timeout(15_000),
@@ -1396,7 +1393,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       anyTooOld = true
       process.stderr.write(
         `molecule channel: workspace ${id} on a platform that predates ` +
-        `since_id cursor support (Molecule-AI/molecule-core PR #2354).\n` +
+        `since_id cursor support.\n` +
         `  Symptom would be: every poll re-delivers all recent activity as if it were new.\n` +
         `  Fix: upgrade workspace-server to a build with /activity ?since_id=… support.\n`
       )
