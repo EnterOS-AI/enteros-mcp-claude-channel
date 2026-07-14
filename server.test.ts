@@ -8,7 +8,7 @@
 // "HTTP 410" error we used to surface.
 
 import { describe, expect, it } from 'bun:test'
-import { formatRemovedWorkspaceError } from './server.ts'
+import { formatRemovedWorkspaceError, orderActivitiesForDelivery } from './server.ts'
 
 describe('formatRemovedWorkspaceError — 410 Gone handling (#2429)', () => {
   it('prefers the platform-supplied id, removed_at, and hint when present', () => {
@@ -45,5 +45,35 @@ describe('formatRemovedWorkspaceError — 410 Gone handling (#2429)', () => {
     })
     expect(msg).not.toContain(' at ')
     expect(msg).toBe('Workspace uuid was deleted on the platform. h')
+  })
+})
+
+describe('orderActivitiesForDelivery — activity API ordering contract', () => {
+  const rows = [
+    { id: 'newest', method: 'message/send' },
+    { id: 'middle', method: 'message/send' },
+    { id: 'oldest', method: 'message/send' },
+  ]
+
+  it('reverses newest-first since_secs backfill into chronological delivery order', () => {
+    expect(orderActivitiesForDelivery(rows, false).map(row => row.id)).toEqual([
+      'oldest',
+      'middle',
+      'newest',
+    ])
+  })
+
+  it('keeps since_id rows in the chronological order returned by the API', () => {
+    const chronological = [...rows].reverse()
+    expect(orderActivitiesForDelivery(chronological, true).map(row => row.id)).toEqual([
+      'oldest',
+      'middle',
+      'newest',
+    ])
+  })
+
+  it('does not mutate the response array', () => {
+    orderActivitiesForDelivery(rows, false)
+    expect(rows.map(row => row.id)).toEqual(['newest', 'middle', 'oldest'])
   })
 })

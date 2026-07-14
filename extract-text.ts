@@ -6,8 +6,8 @@
 // Shape & semantics: see the call site in server.ts and the
 // long-form comment there. This file just owns the function.
 
-// Attachment shape emitted by extractAttachments and (once Layer 1 lands)
-// supplied by the platform as a flat row-level projection. Mirrors the
+// Attachment shape emitted by extractAttachments and optionally supplied by
+// the platform as a flat row-level projection. Mirrors the
 // part shape inside request_body.params.message.parts[] for file/image/
 // audio kinds — see extractAttachments below for the parser, and the
 // platform's workspace-server activity handler for the projected form.
@@ -37,10 +37,10 @@ export interface ActivityEntry {
   // platform_base_adaptor in operator memory). Three slot groups:
   //
   //   - peer_* / agent_card_url: present on peer_agent rows (source_id set)
-  //     once Layer 1 JOINs the workspaces registry on source_id. Absent on
+  //     when the activity endpoint JOINs the workspace registry. Absent on
   //     canvas_user rows by design (no peer).
-  //   - user_*: present on canvas_user rows (source_id=null) once Layer 1
-  //     JOINs the canvas auth session onto the row. Absent on peer_agent
+  //   - user_*: present on canvas_user rows (source_id=null) when the activity
+  //     endpoint projects canvas-auth identity. Absent on peer_agent
   //     rows by design (the sender is a workspace, not a human).
   //   - attachments: present on both kinds when the sender attached a file,
   //     either as a flat row-level projection (Layer 1) or parsed from
@@ -104,14 +104,15 @@ export function extractText(act: ActivityEntry): string {
 }
 
 // extractAttachments — pull file/image/audio parts out of the same
-// request_body shapes extractText walks. The platform stages attachments
-// via inbox_uploads.py as `workspace:` URIs inside parts[].file; until
-// Layer 1 (workspace-server activity endpoint) projects them flat at
-// row-scan time, parse them out here so canvas/peer messages with
-// attachments surface as something Claude can Read/route.
+// request_body shapes extractText walks. Staged chat uploads arrive as
+// `platform-pending:` URIs; server.ts resolves those to cached local file URIs
+// before calling this parser. Older/direct rows may contain `workspace:` or
+// other by-reference URIs. Parse every supported shape so canvas/peer messages
+// still surface attachments when the activity endpoint omits its flat
+// row-level projection.
 //
-// Once Layer 1 ships and the platform supplies act.attachments inline,
-// prefer that — see buildChannelMeta in server.ts which picks
+// When the platform supplies act.attachments inline, prefer that — see
+// emitNotification in server.ts, which picks
 // act.attachments when present and falls back to this parser otherwise.
 export function extractAttachments(act: ActivityEntry): ActivityAttachment[] {
   type Part = {

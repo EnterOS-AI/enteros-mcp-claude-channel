@@ -5,30 +5,30 @@
  * MCP server that bridges Molecule A2A traffic into the active Claude Code
  * session and routes Claude's replies back through Molecule's A2A endpoints.
  *
- * Inbound (A2A → Claude turn): polls each watched workspace's
- *   GET /workspaces/:id/activity?since_secs=N&type=a2a_receive
- * and emits an MCP `notifications/claude/channel` for each new event.
- * Polling (vs push) is the default because it works through every NAT/firewall
- * with zero infra — no tunnel required. For production setups with a public
- * inbound URL, see #2 in the README ("push mode", future).
+ * Inbound (A2A → Claude turn): polls each watched workspace's activity feed
+ * with `since_id=<cursor>` in steady state and a bounded `since_secs=N`
+ * cold-start backfill when no cursor exists. Each new event becomes an MCP
+ * `notifications/claude/channel`. This process is intentionally polling-only:
+ * it needs no tunnel or public inbound URL.
  *
- * Outbound (Claude reply → A2A): exposes the `reply_to_workspace` and
- * `start_workspace_chat` MCP tools that POST to /workspaces/:id/a2a.
+ * Outbound: `reply_to_workspace` routes a response to the latest peer or
+ * canvas sender. The shared external-workspace tools initiate new peer work
+ * (`delegate_task`, `delegate_task_async`) or canvas messages
+ * (`send_message_to_user`).
  *
  * State lives in ~/.claude/channels/molecule/:
- *   - access.json         workspace allowlist + per-workspace auth
  *   - .env                workspace targets + tokens (chmod 600)
- *   - bot.pid             singleton lock
- *   - inbox/              file attachments downloaded from peers
+ *   - bot.pid             primary-election lock (never used to kill a peer)
+ *   - cursor.json         primary cursor; cursor.<pid>.json for secondaries
+ *   - inbox/              locally cached platform-pending attachments
  *
  * Multi-workspace / multi-platform: prefer MOLECULE_WORKSPACES_JSON with
  * [{id, token, platform_url}, ...]. Legacy MOLECULE_PLATFORM_URL +
  * comma-separated MOLECULE_WORKSPACE_IDS/TOKENS still works for a single
  * tenant URL; MOLECULE_PLATFORM_URLS supports one URL per workspace.
  *
- * Cancellation: SIGTERM/SIGINT cleanly drains in-flight pollers + posts a
- * single "channel disconnecting" line back to each watched workspace so
- * peers see a deliberate close, not a silent timeout.
+ * Cancellation: SIGTERM/SIGINT logs the signal and exits; the synchronous
+ * exit handler releases only this process's lock/session cursor state.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -103,10 +103,10 @@ try {
 }
 const WORKSPACE_IDS = WORKSPACE_TARGETS.map(t => t.workspaceId)
 const POLL_INTERVAL_MS = parseInt(process.env.MOLECULE_POLL_INTERVAL_MS ?? '5000', 10)
-// POLL_WINDOW_SECS is only used for the initial "watch from now" cursor seed
-// — after that, the cursor (since_id) drives every subsequent poll. Older
-// versions of the plugin used since_secs as the primary filter; v0.2 keeps
-// the env var for compat but its meaning is narrower.
+// POLL_WINDOW_SECS bounds cold-start backfill when a workspace has no cursor.
+// Those rows are delivered before the newest id is persisted; after that,
+// since_id drives every steady-state poll. Older versions used since_secs as
+// the primary filter, so the env name remains for compatibility.
 const POLL_WINDOW_SECS = parseInt(process.env.MOLECULE_POLL_WINDOW_SECS ?? '30', 10)
 // MOLECULE_AGENT_NAME / MOLECULE_AGENT_DESC populate the agent_card the plugin
 // posts to /registry/register on startup. Both have sane defaults — set them
@@ -249,28 +249,33 @@ process.on('uncaughtException', err => {
 
 // ─── Activity polling (inbound) ─────────────────────────────────────────
 //
-// One independent poll loop per watched workspace. Each loop tracks the
-// max activity_id it has seen so far; on each tick it queries
-//   GET /workspaces/:id/activity?since_secs=POLL_WINDOW_SECS&type=a2a_receive
-// and emits an MCP notification for any activity whose id is new.
-//
-// `since_secs` is wider than the poll interval (30s vs 5s by default) so a
-// single missed tick (transient network blip) doesn't lose messages — the
-// next tick re-fetches the overlap window and the seen-id dedup filters it.
-//
-// activity_logs is paged out at 30 days, so an honest seen-id set never
-// grows unbounded; new sessions start fresh.
+// One independent poll loop per watched workspace. With a persisted cursor,
+// the loop requests rows strictly after that activity id via `since_id`. With
+// no cursor, it requests a bounded `since_secs=POLL_WINDOW_SECS` cold-start
+// backfill, delivers those rows in ascending order, and persists the newest
+// id. There is no in-memory seen-id set or overlapping steady-state window.
 
 // ActivityEntry lives in extract-text.ts (imported above) so unit
 // tests can import the type + helper without triggering server.ts's
 // boot-time side-effects (cursor load, MCP transport connect).
 
+// The activity API deliberately serves cursor reads oldest-first (ASC) and
+// non-cursor feeds newest-first (DESC). Normalize both paths before emitting
+// so cold-start backfill preserves conversation order and the last row remains
+// the newest cursor.
+export function orderActivitiesForDelivery<T>(
+  activities: readonly T[],
+  usingCursor: boolean,
+): T[] {
+  return usingCursor ? [...activities] : [...activities].reverse()
+}
+
 // ─── Cursor persistence ────────────────────────────────────────────────
 //
 // v0.2 switches from the v0.1 since_secs+seenIds scheme to a Telegram-style
-// since_id cursor. The cursor is the activity_logs.id of the last event
-// this plugin successfully delivered to Claude. Server returns events
-// strictly after that id in ASC order, so we never miss or replay.
+// since_id cursor. The cursor is the newest activity_logs.id the plugin has
+// processed in a poll batch. Cursor reads return events strictly after that id
+// in ASC order; notification delivery itself remains best-effort.
 //
 // Persisted via the base MCP's CursorStore (session-keyed: cursor.json for
 // the primary, cursor.<pid>.json for a concurrent secondary) as a JSON
@@ -280,8 +285,8 @@ process.on('uncaughtException', err => {
 // 30-second time-window).
 //
 // Schema:  { "ws-uuid-1": "act-uuid-X", "ws-uuid-2": "act-uuid-Y", ... }
-// Missing key = "first run" → seeds from most-recent without processing.
-// 410 from server = cursor stale → drop key, re-seed on next tick.
+// Missing key = cold start → bounded backfill, then persist newest delivered id.
+// 410 from server = cursor stale → drop key, re-enter cold-start backfill.
 
 // Shared URI cache for chat-upload resolution. Keys are
 // `platform-pending:<ws>/<file_id>` strings — the workspace_id is part
@@ -337,9 +342,8 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   // include=peer_info opts into Layer 1's row-level projection:
   //   peer_name / peer_role / agent_card_url (when source_id resolves to a workspace)
   //   user_name / user_email (canvas-auth — once RFC#637 / CP IAM ships)
-  //   attachments[] (uniform across message/send AND chat_upload_receive flat-uploads
-  //     once mc#1657 lands platform-side; this client just forwards what the server
-  //     provides)
+  //   attachments[] when the platform projects them for message/send and
+  //     chat-upload rows; request_body parsing remains the compatibility fallback
   // Pre-Layer-1 platforms ignore the unknown query param and return the bare row
   // shape — the adaptor degrades gracefully because every consumer reads enriched
   // fields defensively (omit-when-absent via buildChannelMeta).
@@ -359,8 +363,8 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
     // — exactly the friction this channel is supposed to remove).
     //
     // Backfill is bounded by POLL_WINDOW_SECS so a long-idle restart doesn't
-    // replay weeks of conversation. Set POLL_WINDOW_SECS=0 to opt out and
-    // restore the old skip-on-cold-start behavior.
+    // replay weeks of conversation. The activity API requires since_secs to
+    // be a positive integer.
     url.searchParams.set('since_secs', String(POLL_WINDOW_SECS))
   }
 
@@ -386,9 +390,9 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
   }
 
   if (resp.status === 410) {
-    // Cursor row is gone (pruned, or never existed if the env var was
-    // hand-edited). Drop the cursor; next tick re-seeds from most-recent.
-    process.stderr.write(`molecule channel: poll ${workspaceId} cursor stale (410) — re-seeding\n`)
+    // Cursor row is gone (pruned, or never existed if the file was
+    // hand-edited). Drop the cursor; next tick performs bounded backfill.
+    process.stderr.write(`molecule channel: poll ${workspaceId} cursor stale (410) — restarting cold-start backfill\n`)
     cursorStore.delete(workspaceId)
     saveCursors()
     return
@@ -412,11 +416,13 @@ async function pollWorkspace(workspaceId: string, mcp: Server): Promise<void> {
     return
   }
 
-  // Cold-start AND steady-state share the same delivery shape: walk
-  // ASC-ordered events, emit each, advance cursor past the newest. The
-  // only difference is whether we got rows by since_id (steady-state) or
-  // since_secs (cold start backfill); the platform returns the same
-  // column shape and ordering either way.
+  activities = orderActivitiesForDelivery(activities, Boolean(cursor))
+
+  // Cold-start AND steady-state now share the same delivery shape: walk
+  // chronological events, emit each, advance cursor past the newest. The
+  // platform returns the same columns but different ordering: since_id is ASC,
+  // while a since_secs feed without a cursor is DESC. The normalization above
+  // handles that boundary explicitly.
   //
   // Advance cursor even on emit failure — the alternative (block on
   // notification failure) would stall the channel entirely, and
@@ -755,7 +761,7 @@ export const SERVER_CAPABILITIES = {
 } as const
 
 const mcp = new Server(
-  { name: 'molecule', version: '0.4.0-gitea.6' },
+  { name: 'molecule', version: '0.4.0-gitea.8' },
   {
     capabilities: SERVER_CAPABILITIES,
     instructions: [
@@ -1012,10 +1018,9 @@ async function getWorkspaceInfo(args: z.infer<typeof GetWorkspaceInfoArgsSchema>
 //
 // Mirrors the universal `send_message_to_user` tool — POST /workspaces/:id/notify.
 // Lands as a chat bubble in the canvas My Chat panel. The universal tool
-// also supports `attachments` (file paths inside the workspace container)
-// uploaded via /chat/uploads; this channel runs on the user's local FS and
-// uploads from there. Same contract — paths are absolute on whichever side
-// the tool runs from.
+// also supports `attachments` (absolute paths on the runtime host) uploaded
+// via /chat/uploads. This channel runs on the user's local FS and uploads from
+// there; the contract is otherwise the same.
 
 const SendMessageToUserArgsSchema = z.object({
   _as_workspace: z.string().describe(
@@ -1417,7 +1422,7 @@ process.stderr.write(
   `molecule channel: connected — watching ${WORKSPACE_IDS.length} workspace(s) across ${new Set(WORKSPACE_TARGETS.map(t => t.platformUrl)).size} platform(s)\n` +
   `  targets: ${formatTargetSummary(WORKSPACE_TARGETS)}\n` +
   `  role=${election.role}  delivery_mode=poll  cursor=${cursorStore.path}  auto_register=${AUTO_REGISTER_POLL}\n` +
-  `  poll: every ${POLL_INTERVAL_MS}ms (cursor-based; ${POLL_WINDOW_SECS}s window only used for first-run seed)\n` +
+  `  poll: every ${POLL_INTERVAL_MS}ms (cursor-based; ${POLL_WINDOW_SECS}s cold-start backfill window)\n` +
   `  heartbeat: ` +
     (HEARTBEAT_INTERVAL_MS > 0
       ? `every ${HEARTBEAT_INTERVAL_MS}ms (POST /registry/heartbeat — keeps canvas presence on 'online')\n`
@@ -1466,8 +1471,9 @@ if (HEARTBEAT_INTERVAL_MS > 0) {
   })
 }
 
-// Clean shutdown — fire-and-forget a "disconnected" notice on each watched
-// workspace's A2A so peers don't sit waiting on a silent channel.
+// Clean local shutdown. The process exit handler above releases the primary
+// pid lock or this secondary's cursor file; platform presence expires via the
+// normal heartbeat staleness window.
 const shutdown = (sig: string) => {
   process.stderr.write(`molecule channel: ${sig} — shutting down\n`)
   process.exit(0)
