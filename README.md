@@ -307,7 +307,7 @@ all.
 
 The existing external-agent integration in Molecule originally used **push**: register an inbound URL, platform POSTs A2A to that URL. That's lower latency but requires a tunnel (ngrok/Cloudflare) or a static IP — non-trivial for a laptop-launched Claude Code session.
 
-The platform now supports `delivery_mode=poll` natively (`#2339` in `molecule-core`): when a workspace is registered with `delivery_mode=poll`, the platform's a2a_proxy short-circuits inbound A2A directly into `activity_logs` instead of attempting an HTTP dispatch. This plugin sets that mode automatically on startup, so peer messages land in `activity_logs` regardless of whether your laptop has a public URL.
+The platform supports `delivery_mode=poll` natively: when a workspace is registered with that mode, the platform's A2A proxy records inbound traffic in `activity_logs` instead of attempting an HTTP dispatch. This plugin sets the mode automatically on startup, so peer messages land in `activity_logs` regardless of whether your laptop has a public URL.
 
 ### Cursor-based polling (v0.2+)
 
@@ -339,7 +339,7 @@ A2A messages can carry file, image, and audio parts. For staged chat uploads, th
 
 ## Compatibility
 
-- **molecule-runtime/workspace-server**: requires `delivery_mode=poll` support (`/registry/register` + a2a_proxy short-circuit, molecule-core PRs #2348 + #2353) and the `since_id` cursor on `GET /activity` (PR #2354). All three shipped under issue #2339, available staging-onward. The plugin probes for cursor support on startup (sends a known-invalid UUID, expects `410 Gone`) and exits with code 2 if the platform predates PR #2354 — silent re-delivery is a worse failure mode than failing to start. `401`/`403`/`404`/`5xx` from the probe are treated as inconclusive (orthogonal to cursor support — usually a token, workspace_id, or transient-network issue) and the plugin continues to the poll loop where the real failure surfaces with workspace-level context.
+- **molecule-core/workspace-server**: requires `delivery_mode=poll` support (`/registry/register` plus the A2A-proxy short-circuit) and the `since_id` cursor on `GET /activity`. The plugin probes cursor support on startup by sending a known-invalid UUID and expecting `410 Gone`; it exits with code 2 when the platform ignores the cursor, because silent re-delivery is worse than failing to start. `401`/`403`/`404`/`5xx` are inconclusive (usually a token, workspace ID, or transient-network issue), so the normal poll loop surfaces those failures with workspace-level context.
 - **Claude Code**: tested against the channel-plugin contract that expects `notifications/claude/channel` with `{content, meta}` (matches `@claude-plugins-official/telegram` v0.0.6).
 - **bun**: the MCP server runs under bun for fast startup; `package.json` `start` does `([ -d node_modules ] || bun install --no-summary) && bun server.ts`, so dependencies install on a fresh checkout and stay off subsequent MCP-start hot paths.
 

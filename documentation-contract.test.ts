@@ -10,6 +10,8 @@ const readme = await Bun.file(new URL('./README.md', import.meta.url)).text()
 const serverSource = await Bun.file(new URL('./server.ts', import.meta.url)).text()
 const heartbeatSource = await Bun.file(new URL('./heartbeat.ts', import.meta.url)).text()
 const testSetupSource = await Bun.file(new URL('./tests/setup.ts', import.meta.url)).text()
+const serverTestSource = await Bun.file(new URL('./server.test.ts', import.meta.url)).text()
+const capabilitiesTestSource = await Bun.file(new URL('./channel-capabilities-and-filter.test.ts', import.meta.url)).text()
 const packageJson = await Bun.file(new URL('./package.json', import.meta.url)).json() as {
   version: string
 }
@@ -54,6 +56,33 @@ describe('README current-behavior contract', () => {
     expect(readme).not.toContain('Auth tokens')
     expect(readme).not.toContain('Create channel token')
     expect(serverSource).not.toContain('Tokens tab')
+  })
+
+  test('does not cite reused Gitea issue numbers or retired monorepo paths', () => {
+    const combined = `${readme}\n${serverSource}\n${serverTestSource}\n${capabilitiesTestSource}\n${testSetupSource}`
+    for (const stale of [
+      'RFC#640',
+      'internal#640',
+      'PR #2354',
+      'PR-#2354',
+      'Pre-#2354',
+      'PR 2 / #2353',
+      'predate #2339',
+      'molecule-core PRs #2348 + #2353',
+      'issue #2339',
+      'molecule-core#2429',
+      'fixes #1456',
+      'GH#1610',
+      'molecule-runtime/workspace-server',
+      'workspace/a2a_tools.py',
+      'molecule_runtime/a2a_tools.py',
+    ]) {
+      expect(combined).not.toContain(stale)
+    }
+
+    expect(serverSource).toContain(
+      'molecule_runtime/a2a_tools_messaging.py:_upload_chat_files',
+    )
   })
 })
 

@@ -2,7 +2,7 @@
 // the formatRemovedWorkspaceError pure helper so the test doesn't
 // need to mock fetch + resolveWatching just to read one string.
 //
-// molecule-core#2429 — without these tests, the "your workspace was
+// Without these tests, the "your workspace was
 // deleted, re-onboard" message is a 4-line code path that an
 // inattentive refactor could collapse back into the generic
 // "HTTP 410" error we used to surface.
@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'bun:test'
 import { formatRemovedWorkspaceError, orderActivitiesForDelivery } from './server.ts'
 
-describe('formatRemovedWorkspaceError — 410 Gone handling (#2429)', () => {
+describe('formatRemovedWorkspaceError — 410 Gone handling', () => {
   it('prefers the platform-supplied id, removed_at, and hint when present', () => {
     const msg = formatRemovedWorkspaceError('local-fallback-id', {
       id: 'real-uuid',
