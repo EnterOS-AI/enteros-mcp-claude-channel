@@ -28,47 +28,9 @@ jobs:
       - name: Validate internal registry install wiring
         run: bash .gitea/scripts/tests/test_internal_registry_install.sh
 
-      - name: Install dependencies from the authenticated internal registry
-        env:
-          INFISICAL_CI_CLIENT_ID: ${{ secrets.INFISICAL_CI_CLIENT_ID }}
-          INFISICAL_CI_CLIENT_SECRET: ${{ secrets.INFISICAL_CI_CLIENT_SECRET }}
-          INFISICAL_CI_PROJECT_ID: ${{ secrets.INFISICAL_CI_PROJECT_ID }}
+      - name: Install dependencies from the unauthenticated internal registry
         run: |
           set -euo pipefail
-
-          if [ -z "${INFISICAL_CI_CLIENT_ID:-}" ] ||
-             [ -z "${INFISICAL_CI_CLIENT_SECRET:-}" ] ||
-             [ -z "${INFISICAL_CI_PROJECT_ID:-}" ]; then
-            echo "::error::Infisical CI bootstrap identity is required to fetch the internal package-read token; refusing any public-registry fallback."
-            exit 1
-          fi
-
-          BASE=https://key.moleculesai.app
-          TOK=$(curl -fsS -X POST "$BASE/api/v1/auth/universal-auth/login" \
-            -H 'Content-Type: application/json' \
-            -d "{\"clientId\":\"$INFISICAL_CI_CLIENT_ID\",\"clientSecret\":\"$INFISICAL_CI_CLIENT_SECRET\"}" \
-            | python3 -c 'import json,sys; value=json.load(sys.stdin).get("accessToken"); sys.stdout.write(value if isinstance(value,str) else "")')
-          echo "::add-mask::$TOK"
-          if [ -z "$TOK" ]; then
-            echo "::error::Infisical login returned an empty access token."
-            exit 1
-          fi
-
-          MCP_SERVER_READPKG_TOKEN=$(curl -fsS \
-            "$BASE/api/v3/secrets/raw/MOLECULE_TEMPLATE_REPO_TOKEN?workspaceId=$INFISICAL_CI_PROJECT_ID&environment=prod&secretPath=%2Fshared%2Fcontrolplane" \
-            -H "Authorization: Bearer $TOK" \
-            | python3 -c 'import json,sys; value=(json.load(sys.stdin).get("secret") or {}).get("secretValue"); sys.stdout.write(value if isinstance(value,str) else "")')
-          echo "::add-mask::$MCP_SERVER_READPKG_TOKEN"
-          if [ -z "$MCP_SERVER_READPKG_TOKEN" ]; then
-            echo "::error::Infisical returned an empty MOLECULE_TEMPLATE_REPO_TOKEN from prod /shared/controlplane."
-            exit 1
-          fi
-          export MCP_SERVER_READPKG_TOKEN
-
-          # The versioned .npmrc contains only an environment placeholder. Bun
-          # expands it at request time, so the credential never enters config
-          # files or the package cache.
-
           cache_dir="$(mktemp -d)"
           trap 'rm -rf "$cache_dir"' EXIT
           BUN_INSTALL_CACHE_DIR="$cache_dir" bun install --frozen-lockfile

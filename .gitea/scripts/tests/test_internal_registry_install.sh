@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Ratchet the Bun CI install to the read-only internal package identity.
-# shellcheck disable=SC2016 # Assertions intentionally match literal CI expressions.
+# Ratchet the Bun CI install to the unauthenticated internal package surface.
+# shellcheck disable=SC2016 # Assertions intentionally match literal shell text.
 
 set -euo pipefail
 
@@ -35,29 +35,27 @@ require_before() {
 }
 
 require "$NPMRC" "@molecule-ai:registry=https://git.moleculesai.app/api/packages/molecule-ai/npm/"
-require "$NPMRC" '//git.moleculesai.app/api/packages/molecule-ai/npm/:_authToken=${MCP_SERVER_READPKG_TOKEN}'
 require "$PACKAGE_JSON" '"@molecule-ai/mcp-server": "1.8.3"'
 
-require "$WORKFLOW" "Install dependencies from the authenticated internal registry"
-require "$WORKFLOW" 'INFISICAL_CI_CLIENT_ID: ${{ secrets.INFISICAL_CI_CLIENT_ID }}'
-require "$WORKFLOW" 'INFISICAL_CI_CLIENT_SECRET: ${{ secrets.INFISICAL_CI_CLIENT_SECRET }}'
-require "$WORKFLOW" 'INFISICAL_CI_PROJECT_ID: ${{ secrets.INFISICAL_CI_PROJECT_ID }}'
-require "$WORKFLOW" "MOLECULE_TEMPLATE_REPO_TOKEN"
-require "$WORKFLOW" "%2Fshared%2Fcontrolplane"
-require "$WORKFLOW" 'echo "::add-mask::$MCP_SERVER_READPKG_TOKEN"'
-require "$WORKFLOW" 'export MCP_SERVER_READPKG_TOKEN'
+require "$WORKFLOW" "Install dependencies from the unauthenticated internal registry"
 require "$WORKFLOW" 'cache_dir="$(mktemp -d)"'
 require "$WORKFLOW" 'BUN_INSTALL_CACHE_DIR="$cache_dir" bun install --frozen-lockfile'
 require "$WORKFLOW" "bun install --frozen-lockfile"
 
-require_before "$WORKFLOW" "Install dependencies from the authenticated internal registry" "bun install --frozen-lockfile"
-require_before "$WORKFLOW" 'export MCP_SERVER_READPKG_TOKEN' "bun install --frozen-lockfile"
+require_before "$WORKFLOW" "Install dependencies from the unauthenticated internal registry" "bun install --frozen-lockfile"
 
 forbid "$WORKFLOW" "registry.npmjs.org"
 forbid "$WORKFLOW" "gitea-pat-owner"
 forbid "$WORKFLOW" "MOL_PACKAGE_TOKEN"
+forbid "$WORKFLOW" "MOLECULE_TEMPLATE_REPO_TOKEN"
+forbid "$WORKFLOW" "INFISICAL"
+forbid "$WORKFLOW" 'secrets.'
+forbid "$WORKFLOW" "_authToken"
+forbid "$WORKFLOW" "Authorization:"
 forbid "$WORKFLOW" '>> "$GITHUB_ENV"'
 forbid "$NPMRC" "registry.npmjs.org"
 forbid "$NPMRC" "gitea-pat-owner"
+forbid "$NPMRC" "_authToken"
+forbid "$NPMRC" "password"
 
-echo "PASS: Bun CI installs @molecule-ai packages from internal Gitea with read-only auth"
+echo "PASS: Bun CI installs @molecule-ai packages from internal Gitea without exposing credentials"
