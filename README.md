@@ -152,7 +152,7 @@ first-launch pairing handshake — the placeholder `tok-1,tok-2` must be replace
 with real workspace-scoped bearer tokens that you mint yourself (one per
 workspace id, same order). There are exactly two ways to obtain a token, both
 covered in [Getting workspace_id + token](#getting-workspace_id--token) below:
-mint it in the Canvas UI (Settings → Auth tokens → **Create channel token**), or
+mint it in the Canvas UI (Settings → **Workspace Tokens** → **+ New Token**), or
 `POST` to the admin tokens endpoint. The channel will not start while this
 value is empty or placeholder.
 
@@ -190,7 +190,7 @@ Every Molecule workspace has a workspace-scoped bearer that authenticates agains
 ### From Canvas (recommended)
 
 1. Open the workspace in Canvas
-2. Settings tab → "Auth tokens" → **Create channel token**
+2. Settings → **Workspace Tokens** → **+ New Token**
 3. Copy the workspace_id (UUID at the top) and the token (shown once)
 
 ### From the API

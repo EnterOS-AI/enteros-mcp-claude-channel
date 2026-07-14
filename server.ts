@@ -983,7 +983,8 @@ export function formatRemovedWorkspaceError(
 ): string {
   const safeBody = body ?? {}
   const id = safeBody.id ?? workspaceId
-  const hint = safeBody.hint ?? 'Regenerate workspace + token from the canvas → Tokens tab.'
+  const hint = safeBody.hint ??
+    'Create a replacement workspace in Canvas, then open Settings → Workspace Tokens → + New Token.'
   const removed = safeBody.removed_at ? ` at ${safeBody.removed_at}` : ''
   return `Workspace ${id} was deleted on the platform${removed}. ${hint}`
 }

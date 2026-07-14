@@ -39,6 +39,13 @@ describe('README current-behavior contract', () => {
     expect(readme).toContain('[ -d node_modules ] || bun install --no-summary')
     expect(readme).not.toContain('no missed messages')
   })
+
+  test('uses the current Canvas workspace-token labels', () => {
+    expect(readme).toContain('Settings → **Workspace Tokens** → **+ New Token**')
+    expect(readme).not.toContain('Auth tokens')
+    expect(readme).not.toContain('Create channel token')
+    expect(serverSource).not.toContain('Tokens tab')
+  })
 })
 
 describe('server module comment current-behavior contract', () => {

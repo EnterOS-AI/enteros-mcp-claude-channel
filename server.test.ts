@@ -25,7 +25,7 @@ describe('formatRemovedWorkspaceError — 410 Gone handling (#2429)', () => {
   it('falls back to the local workspaceId + default hint when body is empty', () => {
     const msg = formatRemovedWorkspaceError('fallback-uuid', {})
     expect(msg).toBe(
-      'Workspace fallback-uuid was deleted on the platform. Regenerate workspace + token from the canvas → Tokens tab.',
+      'Workspace fallback-uuid was deleted on the platform. Create a replacement workspace in Canvas, then open Settings → Workspace Tokens → + New Token.',
     )
   })
 
@@ -34,7 +34,7 @@ describe('formatRemovedWorkspaceError — 410 Gone handling (#2429)', () => {
       'Workspace uuid was deleted',
     )
     expect(formatRemovedWorkspaceError('uuid', undefined)).toContain(
-      'Regenerate workspace + token',
+      'Settings → Workspace Tokens → + New Token',
     )
   })
 
