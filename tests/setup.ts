@@ -18,9 +18,9 @@ process.env.MOLECULE_PLATFORM_URL ??= 'http://localhost:18080'
 process.env.MOLECULE_WORKSPACE_IDS ??= 'ws-test-00000000-0000-0000-0000-000000000001'
 process.env.MOLECULE_WORKSPACE_TOKENS ??= 'tok-test'
 
-// Force state dir into a temp directory so tests never compete for the
-// production singleton lock at ~/.claude/channels/molecule/bot.pid.
-// Without this, importing server.ts (which mkdirSync's STATE_DIR and
-// claims the PID file) kills any production watcher running for the
-// same user. See issue #14.
+// Force state dir into a temp directory so tests never compete for or modify
+// production primary-election and cursor state under
+// ~/.claude/channels/molecule/. Without this, importing server.ts (which
+// mkdirSync's STATE_DIR and participates in primary election) could claim the
+// lock or create a secondary cursor beside a live watcher. See issue #14.
 process.env.MOLECULE_STATE_DIR ??= mkdtempSync(join(tmpdir(), 'mcp-claude-channel-test-'))
