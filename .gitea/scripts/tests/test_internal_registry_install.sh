@@ -35,7 +35,7 @@ require_before() {
 }
 
 require "$NPMRC" "@molecule-ai:registry=https://git.moleculesai.app/api/packages/molecule-ai/npm/"
-require "$PACKAGE_JSON" '"@molecule-ai/mcp-server": "1.8.3"'
+require "$PACKAGE_JSON" '"@molecule-ai/mcp-server": "^1.9.0"'
 
 require "$WORKFLOW" "Install dependencies from the unauthenticated internal registry"
 require "$WORKFLOW" 'cache_dir="$(mktemp -d)"'

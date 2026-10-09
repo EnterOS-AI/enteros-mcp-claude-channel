@@ -761,7 +761,7 @@ export const SERVER_CAPABILITIES = {
 } as const
 
 const mcp = new Server(
-  { name: 'molecule', version: '0.4.0-gitea.9' },
+  { name: 'molecule', version: '0.4.1-gitea.1' },
   {
     capabilities: SERVER_CAPABILITIES,
     instructions: [

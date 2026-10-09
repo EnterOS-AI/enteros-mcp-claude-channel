@@ -28,7 +28,7 @@ claude plugin install molecule@molecule-channel
 
 `molecule` is the plugin name (from `.claude-plugin/plugin.json`); `molecule-channel` is the marketplace name (from `.claude-plugin/marketplace.json`). Both live in the same repo — installing the marketplace makes the plugin available; installing the plugin enables it for your sessions.
 
-To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.0-gitea.9`. Without a ref, you track `main`.
+To pin a specific version, append `#<tag>` to the marketplace URL — for example `…/molecule-mcp-claude-channel.git#v0.4.1-gitea.1`. Without a ref, you track `main`.
 
 Alternatively, to load the channel for a single session without a persistent
 marketplace install (useful for a quick try, or in CI), pass the channel spec
